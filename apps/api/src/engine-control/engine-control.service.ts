@@ -36,6 +36,7 @@ import {
 } from '../socket-registry/socket-registry.service';
 import { SystemActivityService } from '../system-activity/system-activity.service';
 import { AckWaiterService } from '../tracker-commands/ack-waiter.service';
+import { TRACKER_ENGINE_ECHO_EVENT, type TrackerEngineEchoEvent } from '../tracker-tcp/echo-moteur';
 import { computeNextTransition } from '../vehicle-schedules/schedule-evaluator';
 
 const STALE_THRESHOLD_MOVING_MS = 60 * 1000; // position fraîche exigée si véhicule roulait
@@ -148,6 +149,12 @@ const ENGINE_RESTORE_TCP_RETRY_MS =
   Math.max(1, Number(process.env['ENGINE_RESTORE_TCP_RETRY_MIN']) || 30) * 60 * 1000;
 /** Même fenêtre que la preuve par ignition (positions.service) : au-delà, l'intention est morte. */
 const ENGINE_RESTORE_RECONNECT_WINDOW_MS = 24 * 60 * 60 * 1000;
+/**
+ * 08/10/2026 — un écho `jt` / `kt` arrivé hors de la fenêtre du guetteur est rapproché de la
+ * dernière intention du boîtier si elle date de moins de 24 h (cf. `onEchoMoteur`). Même borne
+ * que la relance à la reconnexion : au-delà, aucune intention n'est plus « la dernière ».
+ */
+const ECHO_MOTEUR_FENETRE_MS = 24 * 60 * 60 * 1000;
 const ENGINE_RESTORE_SMS_EXHAUSTED_ALERT =
   'RESTORE : secours SMS épuisé — relance TCP seule à la reconnexion du boîtier, vérifier le véhicule';
 const RESTORE_SUPPLANTEE_PAR_CUT = 'RESTORE supplantée par une intention CUT plus récente';
@@ -626,6 +633,147 @@ export class EngineControlService implements OnModuleDestroy {
         'Echec du rapprochement d\'un accuse SMS moteur',
       );
     }
+  }
+
+  /**
+   * ══ ÉCHO MOTEUR HORS FENÊTRE — LE BOÎTIER A RÉPONDU, PERSONNE N'ÉCOUTAIT (06 et 07/10/2026) ══
+   *
+   * Mesures et contexte : `tracker-tcp/echo-moteur.ts`. Un véhicule de CDEF31 a coupé 157 s puis
+   * 69 s après l'ordre ; son `jt` est arrivé après l'abandon du guetteur (15 s). La coupure est restée
+   * « envoyée », l'écran du veilleur l'a lue « moteur actif », et le véhicule immobilisé n'avait
+   * plus de bouton « Rallumer » — deux soirs de suite, débloqué deux fois par un SMS manuel.
+   *
+   * ── LE RAPPROCHEMENT SE FAIT SUR LA DERNIÈRE INTENTION DU BOÎTIER ──────────────────────
+   *
+   * `jt` dit « le relais vient de couper », `kt` « il vient de rétablir » : c'est l'état du
+   * véhicule MAINTENANT. On l'applique à la dernière intention de l'application pour ce boîtier
+   * (24 h, refus de vitesse et envois impossibles exclus), et seulement si elle va dans le même
+   * sens :
+   *   - même action, pas encore acquittée (PENDING, SENT, SENT_UNCONFIRMED) → ACKNOWLEDGED ;
+   *   - même action, déjà acquittée → second écho, rien à faire ;
+   *   - action inverse → le boîtier contredit la dernière demande : on ne corrige RIEN d'office
+   *     (l'écho peut précéder de peu l'exécution de l'ordre suivant), on le dit — cf.
+   *     `signalerEchoContradictoire`.
+   *
+   * `SENT_UNCONFIRMED` est rapprochable, et c'est voulu : « nul ne sait » cède devant une preuve.
+   * Une CUT supplantée par une RESTORE ne l'est pas : la RESTORE est alors la dernière intention.
+   *
+   * La tentative TCP garde son `TIMED_OUT` : le guetteur a bien abandonné, c'est un fait. La preuve
+   * vit sur la commande (`ackedAt`) et dans `wire_logs` (trame `ack`, latence réelle).
+   *
+   * Ne lève jamais : un abonné qui casse casserait l'ingestion des trames de ce boîtier.
+   */
+  @OnEvent(TRACKER_ENGINE_ECHO_EVENT)
+  async onEchoMoteur(evt: TrackerEngineEchoEvent): Promise<void> {
+    try {
+      if (!evt?.imei || (evt.action !== 'CUT' && evt.action !== 'RESTORE')) return;
+      const action = evt.action === 'CUT' ? EngineAction.CUT : EngineAction.RESTORE;
+      const tracker = await this.prisma.tracker.findUnique({
+        where: { imei: evt.imei },
+        select: { id: true, imei: true, vehicle: { select: { fleetId: true, plate: true } } },
+      });
+      if (!tracker) return;
+      const plaque = tracker.vehicle?.plate ?? tracker.imei;
+
+      const derniere = await this.prisma.engineControlCommand.findFirst({
+        where: {
+          trackerId: tracker.id,
+          source: { not: 'DEVICE_OBSERVED' },
+          status: { notIn: [CommandStatus.REJECTED_SPEED, CommandStatus.FAILED] },
+          createdAt: { gte: new Date(Date.now() - ECHO_MOTEUR_FENETRE_MS) },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!derniere) {
+        this.logger.warn(
+          { imei: tracker.imei, action },
+          `Écho moteur de ${plaque} sans intention de l’application depuis 24 h : rien à rapprocher`,
+        );
+        return;
+      }
+      if (derniere.action !== action) {
+        this.signalerEchoContradictoire(tracker, plaque, action, derniere, evt.raw);
+        return;
+      }
+      if (derniere.ackedAt || derniere.status === CommandStatus.ACKNOWLEDGED) return;
+
+      // Conditionnel, comme partout ailleurs (T48) : un accusé posé entre la lecture et ici par un
+      // autre chemin (SMS, ignition, guetteur) l'emporte et n'est pas réécrit.
+      const { count } = await this.prisma.engineControlCommand.updateMany({
+        where: {
+          id: derniere.id,
+          ackedAt: null,
+          status: { in: [CommandStatus.PENDING, CommandStatus.SENT, CommandStatus.SENT_UNCONFIRMED] },
+        },
+        data: {
+          status: CommandStatus.ACKNOWLEDGED,
+          ackedAt: new Date(),
+          activeKey: null,
+          nextAttemptAt: null,
+          dispatchLeaseUntil: null,
+        },
+      });
+      if (count !== 1) return;
+
+      const latenceMs = Date.now() - (derniere.sentAt ?? derniere.createdAt).getTime();
+      this.wireLogger.ackMatch(tracker.imei, evt.raw, derniere.id, latenceMs);
+      this.logger.warn(
+        { commandId: derniere.id, imei: tracker.imei, action, statutAvant: derniere.status, latenceMs },
+        `Écho moteur hors fenêtre rapproché : ${action === EngineAction.CUT ? 'coupure' : 'remise en route'} de ${plaque} acquittée ${Math.round(latenceMs / 1000)} s après l’envoi`,
+      );
+      const acked = await this.prisma.engineControlCommand.findUnique({ where: { id: derniere.id } });
+      if (acked && tracker.vehicle?.fleetId) this.emitUpdate(acked, tracker.vehicle.fleetId);
+    } catch (err) {
+      this.logger.error(
+        { imei: evt?.imei, error: err instanceof Error ? err.message : String(err) },
+        'Échec du rapprochement d’un écho moteur hors fenêtre',
+      );
+    }
+  }
+
+  /**
+   * L'écho contredit la dernière demande de l'application pour ce boîtier.
+   *
+   * Une demande encore non acquittée suit déjà sa propre route (relances, secours SMS, alerte à
+   * 60 s pour une RESTORE ; état « non confirmée » à l'écran) : une ligne de journal suffit. Une
+   * demande ACQUITTÉE, elle, fait croire à un état que le boîtier vient de démentir — c'est écrit au
+   * centre d'alerte, et en CRITICAL pour `jt` après une remise en route acquittée : un véhicule
+   * immobilisé que tout le monde croit libre, exactement l'appel de nuit à éviter.
+   *
+   * Le message ne porte ni heure ni compteur : l'empreinte de déduplication ne doit pas changer
+   * d'un écho à l'autre (leçon de TRK-039).
+   */
+  private signalerEchoContradictoire(
+    tracker: { id: string; imei: string; vehicle: { fleetId: string } | null },
+    plaque: string,
+    echo: EngineAction,
+    derniere: EngineControlCommand,
+    raw: string,
+  ): void {
+    const message =
+      echo === EngineAction.CUT
+        ? `Le boîtier de ${plaque} signale une coupure (jt) alors que la dernière demande est une remise en route (${derniere.status}) — vérifier le véhicule`
+        : `Le boîtier de ${plaque} signale une remise en route (kt) alors que la dernière demande est une coupure (${derniere.status}) — vérifier le véhicule`;
+    this.logger.warn(
+      { imei: tracker.imei, echo, commandId: derniere.id, statut: derniere.status, creeA: derniere.createdAt.toISOString() },
+      message,
+    );
+    if (derniere.status !== CommandStatus.ACKNOWLEDGED) return;
+    this.errorLogger
+      .record(
+        message,
+        'engine-control',
+        {
+          imei: tracker.imei,
+          trackerId: tracker.id,
+          commandId: derniere.id,
+          fleetId: tracker.vehicle?.fleetId ?? undefined,
+          creeA: derniere.createdAt.toISOString(),
+          frameRaw: raw,
+        },
+        echo === EngineAction.CUT ? 'CRITICAL' : 'ERROR',
+      )
+      .catch(() => undefined);
   }
 
   /**
@@ -2226,6 +2374,12 @@ export class EngineControlService implements OnModuleDestroy {
         // laisse desormais en SENT (livree) ; le .then ci-dessus capte un eventuel echo
         // si un firmware en emet un. Amelioration future : confirmation via etat
         // ignition de la trame suivante (a valider terrain, cf docs/03 §11).
+        //
+        // ⚠️ 08/10/2026 — « silencieusement » est FAUX pour le 403C, mesuré chez CDEF31 : il
+        // émet bien `jt`, mais il peut DIFFÉRER la coupure et ne répondre qu'au moment où il
+        // coupe — 157 s le 06/10, 69 s le 07/10, après l'abandon de ce guetteur. Cet écho
+        // tardif n'est plus perdu : le serveur TCP le diffuse (`tracker.engine-echo`) et
+        // `onEchoMoteur` l'applique à la commande. Le statut SENT reste l'état d'attente.
         this.logger.debug(
           { commandId: command.id, attemptId: attempt.id, imei },
           'CUT livrée sur TCP sans ACK applicatif — attente de la preuve ignition',
