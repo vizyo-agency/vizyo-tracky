@@ -4,8 +4,9 @@
 > trames des boîtiers, journal système). Code de référence : `origin/main` = `88cd0711`, celui qui
 > tourne en production.
 >
-> Correctif : branche `fix/coupe-non-accusee-rallumer` (commit `ff8b2187`). **Ni fusionnée ni
-> déployée**, en attente de l'accord du propriétaire.
+> Correctif : branche `fix/coupe-non-accusee-rallumer` (commit `ff8b2187`, repris après une
+> relecture indépendante — § « Relecture »). **Ni fusionnée ni déployée**, en attente de l'accord
+> du propriétaire.
 >
 > Le dossier du premier soir, `00-INCIDENT-2026-10-06-ET-REFONTE.md`, est resté hors du dépôt
 > (non commité, il cite des données personnelles). Ce document le complète et **corrige un point
@@ -123,17 +124,25 @@ jamais levé (le SMS manuel est fait hors de Tracky). Conséquences **mesurées*
 
 ## Ce que corrige la branche `fix/coupe-non-accusee-rallumer`
 
-**1. L'écho tardif n'est plus jeté (API).**
+**1. L'écho tardif d'une coupure n'est plus jeté (API).**
 - `TcpServerService` : une trame `imei:<IMEI>,jt,…` ou `kt` qu'aucun guetteur n'a prise, reçue sur
-  la connexion en cours du boîtier, est diffusée (`tracker.engine-echo`).
-- `EngineControlService.onEchoMoteur` l'applique à la **dernière intention** du boîtier (24 h,
-  refus et échecs exclus), si elle va dans le même sens. `PENDING`, `SENT`, `SENT_UNCONFIRMED`
-  deviennent `ACKNOWLEDGED`, et l'écran est prévenu par WebSocket.
-- Un écho **contraire** ne change rien. S'il dément une commande acquittée, il est écrit au centre
-  d'alerte : `CRITICAL` pour un `jt` après un rallumage acquitté (véhicule immobilisé que tout le
-  monde croit libre).
-- Le même chemin rattrape l'écho arrivé **avant** le guetteur (TRK-083 / T71). Fin des SMS payants
-  et des `CRITICAL` à tort sur un rallumage déjà exécuté.
+  la connexion en cours du boîtier, est diffusée (`tracker.engine-echo`) **avec l'heure GPS de la
+  trame**.
+- `EngineControlService.onEchoMoteur` la confronte à la **dernière intention** du boîtier (24 h,
+  refus et échecs exclus) :
+  - écho daté de plus de 15 s **avant** cette intention : trame rejouée (les Coban revident leur
+    tampon à la reconnexion) ou réponse à un ordre plus ancien → ignoré ;
+  - `jt` et dernière intention = coupure non acquittée (`PENDING`, `SENT`, `SENT_UNCONFIRMED`) →
+    `ACKNOWLEDGED`, et l'écran est prévenu par WebSocket. Jamais une coupure **supplantée** par un
+    rallumage, même supplantée entre la lecture et l'écriture (condition dans le `where`) ;
+  - écho **contraire** à la dernière intention : rien ne change. S'il dément une commande
+    acquittée, il est écrit au centre d'alerte — `CRITICAL` pour un `jt` après un rallumage
+    acquitté (véhicule immobilisé que tout le monde croit libre) ;
+  - `kt` d'un rallumage : rien. Le rallumage a déjà sa route (relance TCP, secours SMS, alerte à
+    60 s), et toutes ses écritures ne sont pas conditionnelles : un acquittement posé en parallèle
+    pourrait y être écrasé.
+- Le même chemin rattrape l'écho **précoce** d'une coupure (arrivé avant l'inscription du guetteur,
+  TRK-083 — GR-898-HY le 16/09). Celui d'un rallumage reste T71 (un SMS payant pour rien).
 
 Avec ce correctif, le 07/10 à 23:07:54, la coupure serait passée « acquittée » : l'écran aurait
 affiché « Moteur coupé » et offert « Rallumer ».
@@ -150,16 +159,32 @@ où l'écho n'arrive jamais.
 
 - Une phrase sous les boutons dit la sortie : « Si le véhicule doit repartir, utilisez
   « Rallumer » ».
+- Une coupure restée `PENDING` plus de 2 min est orpheline (le serveur la renverra) : « Couper »
+  redevient offert, sinon il resterait grisé pour toujours.
 - Les observations `DEVICE_OBSERVED` ne comptent plus, comme côté serveur.
 - La liste lue passe de 5 à 20 lignes. Avec 5, quelques refus suffisaient à pousser la vraie
   coupure hors de la fenêtre.
+- Un bouton ne relit sa liste que pour un événement **de son boîtier**. Avant, chaque événement de
+  la flotte faisait relire la liste à chaque bouton déjà concerné (30 boutons × 90 événements à
+  22:00) : de quoi heurter la limite de 100 requêtes par minute, et faire retomber l'écran sur
+  l'overlay temps réel, moins précis.
 
 **Tests**
-- Web : 6 nouveaux cas, qui rejouent les séquences réelles des 06 et 07/10. Sur l'ancien code,
-  le cas du 07/10 rend exactement l'écran du veilleur (« Moteur actif », « Rallumer » grisé) : 5
-  des 6 sont rouges.
-- API : 9 cas sur le chemin TCP, avec les trames réelles et un IMEI fictif ; 11 cas sur
-  `onEchoMoteur`.
+- Web : 9 nouveaux cas, dont les séquences réelles des 06 et 07/10. Sur l'ancien code, le cas du
+  07/10 rend exactement l'écran du veilleur (« Moteur actif », « Rallumer » grisé).
+- API : 10 cas sur le chemin TCP (trames réelles, IMEI fictif, heure GPS transportée) ; 16 cas sur
+  `onEchoMoteur` (dont trame rejouée, écho sans heure, coupure supplantée, `kt` sans effet).
+
+### Relecture indépendante (08/10, avant toute fusion)
+
+Une relecture contradictoire de la première version a trouvé trois défauts, corrigés :
+- **un écho n'était pas daté** : une trame rejouée aurait pu acquitter une commande neuve
+  (`kt` d'hier → rallumage d'aujourd'hui arrêté en silence) ;
+- **le worker des rallumages peut écraser un acquittement** (écritures non conditionnelles dans
+  `retryTcpOnly` et les échecs SMS) : d'où « coupure seule » ;
+- **une supplantation entre lecture et écriture** pouvait faire acquitter une coupure abandonnée.
+
+Elle a aussi relevé ce qui reste ouvert (section suivante).
 
 ---
 
@@ -172,9 +197,20 @@ où l'écho n'arrive jamais.
   état ; il ne lève pas le gel du veilleur.
 - **P0-3, P0-4, P0-6** : alerte « veilleur bloqué », push d'urgence `CRITICAL`, 403 en rafale
   sur `/schedule`.
-- La règle serveur `etatCoupeParTracker` ignore toujours `SENT_UNCONFIRMED` (carte, repli temps
-  réel). Le bouton, lui, en tient compte.
+- La règle serveur `etatCoupeParTracker` ignore toujours `SENT_UNCONFIRMED`, et le passage à cet
+  état n'est jamais diffusé par WebSocket. La **liste** servie au bouton en tient compte ; le
+  **repli** sur l'overlay temps réel (liste illisible trois fois de suite, pendant un déploiement
+  par exemple) ne le fait pas encore. C'est le cœur de P0-1 : un seul modèle d'état, partagé.
 - Un écho `jt` dans une trame sans position GPS (`no_fix`) n'est pas lu. Jamais observé.
+- **Une coupure différée peut-elle s'exécuter APRÈS un rallumage ?** Personne ne le sait : la
+  supplantation ne touche que la base et le SMS en file, pas un `J` déjà différé dans le boîtier.
+  Si cela arrive, le `jt` lève un `CRITICAL`, mais l'écran reste « Moteur actif ». La sortie est
+  alors « Couper » puis « Rallumer ». À vérifier au banc 403C avant d'aller plus loin.
+- Les écritures non conditionnelles du worker des rallumages (`retryTcpOnly`, échecs SMS) restent
+  à rendre conditionnelles (`ackedAt: null`), avec T71 et T78.
+- En coupure « en vol », le bandeau « Le boîtier n'a pas confirmé » offre encore « Renvoyer la
+  commande », qui renvoie une coupure que le bouton refuse (l'API la rend telle quelle, sans
+  effet).
 
 ---
 
