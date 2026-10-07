@@ -56,6 +56,8 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
   let commandesServies: unknown[] | null;
   /** Profondeur demandée à l'API par le composant (08/10/2026 : 5 ne suffisait pas). */
   let profondeurDemandee: number | undefined;
+  /** Nombre de lectures de la liste : un bouton ne la relit que pour un événement de SON boîtier. */
+  let lecturesListe: number;
   /** Les événements ENGINE_COMMAND_UPDATED reçus par WebSocket, par boîtier. */
   let majCommandes: ReturnType<typeof signal<Map<string, unknown>>>;
 
@@ -80,6 +82,7 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
     enMouvement = signal(new Set<string>());
     majCommandes = signal(new Map<string, unknown>());
     profondeurDemandee = undefined;
+    lecturesListe = 0;
 
     TestBed.configureTestingModule({
       imports: [EngineControlButtonComponent],
@@ -112,6 +115,7 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
             // Liste indisponible : le composant retombe sur l'overlay temps réel.
             listCommands: (_tracker: string, profondeur?: number) => {
               profondeurDemandee = profondeur;
+              lecturesListe += 1;
               return commandesServies ? of(commandesServies) : throwError(() => new Error('403'));
             },
             requestCommand: () => of({}),
@@ -381,7 +385,9 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
     expect(aide()).toBe('');
   }));
 
-  it('🔴 les refus ne poussent plus la coupure hors de la liste : profondeur 20, et l’état tient sous six refus', fakeAsync(() => {
+  // Ce que ce cas PROUVE : la profondeur demandée à l'API (20). Le faux service rend toujours ses
+  // huit lignes, quelle que soit la profondeur ; l'affichage est vérifié, la fenêtre ne l'est pas.
+  it('🔴 la liste lue passe à 20 lignes (avec 5, six refus sortaient la coupure de la fenêtre)', fakeAsync(() => {
     commandesServies = [
       ...[1, 2, 3, 4, 5, 6].map((n) => ligne('CUT', 'REJECTED_SPEED', n / 10)),
       ligne('CUT', 'SENT', 2),
@@ -425,5 +431,54 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
     expect(bouton('rallumer')?.disabled).toBeFalse();
     expect(bouton('couper')?.title).toContain('déjà coupé');
     expect(aide()).toBe('');
+  }));
+
+  it('une coupure restée PENDING au-delà de 2 min est orpheline : « Couper » redevient offert (le serveur la renverra)', fakeAsync(() => {
+    commandesServies = [ligne('CUT', 'PENDING', 5), ligne('RESTORE', 'ACKNOWLEDGED', 60)];
+    creer();
+    tick();
+    fixture.detectChanges();
+
+    expect(texteEtat()).toBe('Coupure non confirmée');
+    expect(bouton('rallumer')?.disabled).toBeFalse();
+    expect(bouton('couper')?.disabled).withContext('sinon grisé pour toujours').toBeFalse();
+  }));
+
+  it('une coupure PENDING récente est en vol : « Couper » reste refusé', fakeAsync(() => {
+    commandesServies = [ligne('CUT', 'PENDING', 0.5), ligne('RESTORE', 'ACKNOWLEDGED', 60)];
+    creer();
+    tick();
+    fixture.detectChanges();
+
+    expect(bouton('couper')?.disabled).toBeTrue();
+    expect(bouton('rallumer')?.disabled).toBeFalse();
+  }));
+
+  it('🔴 un événement d’un AUTRE boîtier ne relit pas la liste de celui-ci — un événement neuf du sien, une fois', fakeAsync(() => {
+    // Avant : la carte des événements change à chaque commande de la flotte, et chaque bouton déjà
+    // concerné relisait sa liste — 30 boutons × 90 événements dans la vague de 22:00.
+    commandesServies = [ligne('CUT', 'SENT', 1), ligne('RESTORE', 'ACKNOWLEDGED', 60)];
+    creer();
+    tick();
+    fixture.detectChanges();
+    const evtSien = { commandId: 'x', trackerId: TRACKER, action: 'CUT', status: 'SENT' };
+    majCommandes.set(new Map([[TRACKER, evtSien]]));
+    fixture.detectChanges();
+    tick();
+    const apresSien = lecturesListe;
+
+    // Trois événements d'autres boîtiers : la carte change, l'entrée de CE boîtier non.
+    for (const autre of ['t-2', 't-3', 't-4']) {
+      majCommandes.set(new Map([...majCommandes(), [autre, { trackerId: autre }]]));
+      fixture.detectChanges();
+      tick();
+    }
+    expect(lecturesListe).withContext('relu pour des commandes qui ne le concernent pas').toBe(apresSien);
+
+    // Un nouvel événement de CE boîtier : une lecture, une seule.
+    majCommandes.set(new Map([...majCommandes(), [TRACKER, { ...evtSien, status: 'ACKNOWLEDGED' }]]));
+    fixture.detectChanges();
+    tick();
+    expect(lecturesListe).toBe(apresSien + 1);
   }));
 });

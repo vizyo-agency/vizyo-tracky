@@ -17,8 +17,10 @@
  * Même trou dans l'autre sens (TRK-083 / T71) : un écho arrivé AVANT l'inscription du guetteur
  * (`kt` 0,4 s après l'envoi, le 07/10 à 05:00:05, sur un autre véhicule) est perdu de la même façon.
  *
- * Le serveur TCP diffuse donc tout écho moteur qu'aucun guetteur n'a pris ; `EngineControlService`
- * le rapproche de la dernière intention de l'application pour ce boîtier.
+ * Le serveur TCP diffuse donc tout écho moteur qu'aucun guetteur n'a pris, avec l'heure GPS de la
+ * trame. `EngineControlService.onEchoMoteur` rapproche un `jt` de la dernière COUPURE du boîtier
+ * (tardif ou précoce) ; un `kt` ne fait que signaler une contradiction — la remise en route garde
+ * sa propre route (relance TCP, secours SMS), et son écho précoce reste T71.
  */
 export const TRACKER_ENGINE_ECHO_EVENT = 'tracker.engine-echo';
 
@@ -30,6 +32,12 @@ export interface TrackerEngineEchoEvent {
   raw: string;
   /** Réception par le serveur, ISO 8601. */
   at: string;
+  /**
+   * Heure de la trame selon le BOÎTIER (GPS), ISO 8601. C'est elle qui date l'écho : un Coban
+   * revide son tampon à la reconnexion, et un `jt` d'hier peut arriver maintenant. Sans heure, un
+   * écho ne prouve rien.
+   */
+  deviceTime: string | null;
 }
 
 /**

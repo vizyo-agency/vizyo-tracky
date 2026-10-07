@@ -155,6 +155,15 @@ const ENGINE_RESTORE_RECONNECT_WINDOW_MS = 24 * 60 * 60 * 1000;
  * que la relance à la reconnexion : au-delà, aucune intention n'est plus « la dernière ».
  */
 const ECHO_MOTEUR_FENETRE_MS = 24 * 60 * 60 * 1000;
+/**
+ * Tolérance d'horloge pour dater un écho : l'heure de la trame vient du GPS du boîtier (à la
+ * seconde), `createdAt` de l'horloge du serveur. Un écho daté de plus de 15 s AVANT la commande
+ * ne peut pas lui répondre — c'est une trame rejouée (tampon revidé à la reconnexion) ou l'écho
+ * d'un ordre plus ancien.
+ */
+const ECHO_MOTEUR_TOLERANCE_HORLOGE_MS = 15_000;
+/** Motif posé sur une CUT supplantée (cf. `requestCommand`) — préfixe aussi la variante « SMS annulé ». */
+const CUT_SUPPLANTEE_PAR_RESTORE = 'CUT supplantée par une intention RESTORE plus récente';
 const ENGINE_RESTORE_SMS_EXHAUSTED_ALERT =
   'RESTORE : secours SMS épuisé — relance TCP seule à la reconnexion du boîtier, vérifier le véhicule';
 const RESTORE_SUPPLANTEE_PAR_CUT = 'RESTORE supplantée par une intention CUT plus récente';
@@ -646,17 +655,22 @@ export class EngineControlService implements OnModuleDestroy {
    * ── LE RAPPROCHEMENT SE FAIT SUR LA DERNIÈRE INTENTION DU BOÎTIER ──────────────────────
    *
    * `jt` dit « le relais vient de couper », `kt` « il vient de rétablir » : c'est l'état du
-   * véhicule MAINTENANT. On l'applique à la dernière intention de l'application pour ce boîtier
-   * (24 h, refus de vitesse et envois impossibles exclus), et seulement si elle va dans le même
-   * sens :
-   *   - même action, pas encore acquittée (PENDING, SENT, SENT_UNCONFIRMED) → ACKNOWLEDGED ;
-   *   - même action, déjà acquittée → second écho, rien à faire ;
+   * véhicule à l'heure de la trame. On le confronte à la dernière intention de l'application pour
+   * ce boîtier (24 h, refus de vitesse et envois impossibles exclus) :
+   *   - écho daté d'AVANT cette intention (heure GPS du boîtier, tolérance 15 s) → trame rejouée
+   *     ou réponse à un ordre plus ancien : ignoré. Les Coban revident leur tampon à la reconnexion,
+   *     un `kt` d'hier peut arriver maintenant (relecture indépendante du correctif, 08/10) ;
    *   - action inverse → le boîtier contredit la dernière demande : on ne corrige RIEN d'office
    *     (l'écho peut précéder de peu l'exécution de l'ordre suivant), on le dit — cf.
-   *     `signalerEchoContradictoire`.
-   *
-   * `SENT_UNCONFIRMED` est rapprochable, et c'est voulu : « nul ne sait » cède devant une preuve.
-   * Une CUT supplantée par une RESTORE ne l'est pas : la RESTORE est alors la dernière intention.
+   *     `signalerEchoContradictoire` ;
+   *   - COUPURE pas encore acquittée (PENDING, SENT, SENT_UNCONFIRMED) → ACKNOWLEDGED. Cela couvre
+   *     l'écho tardif (06 et 07/10) et l'écho arrivé avant l'inscription du guetteur (TRK-083 sur
+   *     une coupure). `SENT_UNCONFIRMED` est rapprochable : « nul ne sait » cède devant une preuve —
+   *     sauf une coupure SUPPLANTÉE par une remise en route, qui ne l'est jamais, même si la
+   *     supplantation arrive entre la lecture et l'écriture (condition dans le `where`).
+   *   - REMISE EN ROUTE : rien. Elle a déjà sa route (relance TCP, secours SMS, alerte à 60 s), et
+   *     toutes ses écritures ne sont pas conditionnelles (`retryTcpOnly`, échecs SMS) : un
+   *     acquittement posé en parallèle pourrait y être écrasé. Son écho précoce reste T71.
    *
    * La tentative TCP garde son `TIMED_OUT` : le guetteur a bien abandonné, c'est un fait. La preuve
    * vit sur la commande (`ackedAt`) et dans `wire_logs` (trame `ack`, latence réelle).
@@ -667,6 +681,9 @@ export class EngineControlService implements OnModuleDestroy {
   async onEchoMoteur(evt: TrackerEngineEchoEvent): Promise<void> {
     try {
       if (!evt?.imei || (evt.action !== 'CUT' && evt.action !== 'RESTORE')) return;
+      // Un écho sans heure — ou daté du futur — ne prouve rien : on ne sait pas à quoi il répond.
+      const heureBoitier = evt.deviceTime ? new Date(evt.deviceTime).getTime() : Number.NaN;
+      if (!Number.isFinite(heureBoitier) || heureBoitier > Date.now() + ECHO_MOTEUR_TOLERANCE_HORLOGE_MS) return;
       const action = evt.action === 'CUT' ? EngineAction.CUT : EngineAction.RESTORE;
       const tracker = await this.prisma.tracker.findUnique({
         where: { imei: evt.imei },
@@ -691,19 +708,41 @@ export class EngineControlService implements OnModuleDestroy {
         );
         return;
       }
+      if (heureBoitier < derniere.createdAt.getTime() - ECHO_MOTEUR_TOLERANCE_HORLOGE_MS) {
+        this.logger.warn(
+          { imei: tracker.imei, action, commandId: derniere.id, deviceTime: evt.deviceTime, creeA: derniere.createdAt.toISOString() },
+          `Écho moteur de ${plaque} antérieur à la dernière intention : trame rejouée ou réponse à un ordre plus ancien, ignorée`,
+        );
+        return;
+      }
       if (derniere.action !== action) {
         this.signalerEchoContradictoire(tracker, plaque, action, derniere, evt.raw);
+        return;
+      }
+      if (action !== EngineAction.CUT) {
+        this.logger.debug(
+          { imei: tracker.imei, commandId: derniere.id, statut: derniere.status },
+          'Écho `kt` hors fenêtre : la remise en route suit sa propre route (relance, secours SMS)',
+        );
         return;
       }
       if (derniere.ackedAt || derniere.status === CommandStatus.ACKNOWLEDGED) return;
 
       // Conditionnel, comme partout ailleurs (T48) : un accusé posé entre la lecture et ici par un
-      // autre chemin (SMS, ignition, guetteur) l'emporte et n'est pas réécrit.
+      // autre chemin (SMS, ignition, guetteur) l'emporte et n'est pas réécrit ; une supplantation par
+      // une remise en route survenue entre-temps aussi.
       const { count } = await this.prisma.engineControlCommand.updateMany({
         where: {
           id: derniere.id,
           ackedAt: null,
-          status: { in: [CommandStatus.PENDING, CommandStatus.SENT, CommandStatus.SENT_UNCONFIRMED] },
+          OR: [
+            { status: { in: [CommandStatus.PENDING, CommandStatus.SENT] } },
+            { status: CommandStatus.SENT_UNCONFIRMED, lastError: null },
+            {
+              status: CommandStatus.SENT_UNCONFIRMED,
+              NOT: { lastError: { startsWith: CUT_SUPPLANTEE_PAR_RESTORE } },
+            },
+          ],
         },
         data: {
           status: CommandStatus.ACKNOWLEDGED,
@@ -718,8 +757,8 @@ export class EngineControlService implements OnModuleDestroy {
       const latenceMs = Date.now() - (derniere.sentAt ?? derniere.createdAt).getTime();
       this.wireLogger.ackMatch(tracker.imei, evt.raw, derniere.id, latenceMs);
       this.logger.warn(
-        { commandId: derniere.id, imei: tracker.imei, action, statutAvant: derniere.status, latenceMs },
-        `Écho moteur hors fenêtre rapproché : ${action === EngineAction.CUT ? 'coupure' : 'remise en route'} de ${plaque} acquittée ${Math.round(latenceMs / 1000)} s après l’envoi`,
+        { commandId: derniere.id, imei: tracker.imei, statutAvant: derniere.status, latenceMs, deviceTime: evt.deviceTime },
+        `Écho moteur hors fenêtre rapproché : coupure de ${plaque} acquittée ${Math.round(latenceMs / 1000)} s après l’envoi`,
       );
       const acked = await this.prisma.engineControlCommand.findUnique({ where: { id: derniere.id } });
       if (acked && tracker.vehicle?.fleetId) this.emitUpdate(acked, tracker.vehicle.fleetId);
@@ -1314,7 +1353,7 @@ export class EngineControlService implements OnModuleDestroy {
           nextAttemptAt: null,
           dispatchLeaseUntil: null,
           expiredAt: new Date(),
-          lastError: 'CUT supplantée par une intention RESTORE plus récente',
+          lastError: CUT_SUPPLANTEE_PAR_RESTORE,
         },
       });
       for (const cut of supplantees) {

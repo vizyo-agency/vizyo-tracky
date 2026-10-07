@@ -13,8 +13,8 @@ import { TcpServerService } from './tcp-server.service';
  * bouton « Rallumer » : deux appels de nuit, deux SMS manuels.
  *
  * Ces tests font passer les trames RÉELLES de ces soirs-là (IMEI remplacé) par le vrai décodeur
- * et le vrai `dispatchFrame` : un écho qu'aucun guetteur n'a pris doit être DIFFUSÉ, pour que
- * `EngineControlService.onEchoMoteur` le rapproche de la commande.
+ * et le vrai `dispatchFrame` : un écho qu'aucun guetteur n'a pris doit être DIFFUSÉ, avec l'heure
+ * GPS de la trame, pour que `EngineControlService.onEchoMoteur` le rapproche de la commande.
  */
 
 // IMEI fictif (15 chiffres) : le dépôt est public, aucun identifiant réel de boîtier ici.
@@ -155,6 +155,19 @@ describe('TcpServerService — écho moteur orphelin (06 et 07/10/2026)', () => 
     expect(c.events.emit).toHaveBeenCalledWith(
       TRACKER_ENGINE_ECHO_EVENT,
       expect.objectContaining({ imei: IMEI, action: 'CUT', raw: TRAME_JT.slice(0, -1) }),
+    );
+  });
+
+  it('🔴 l’écho porte l’heure GPS de la TRAME, pas celle de réception : c’est elle qui démasque une trame rejouée', async () => {
+    c = monter();
+    await connecter(c);
+    c.socket.recevoir(TRAME_JT);
+    await laisserTraiter();
+
+    // `261007210752` / `210752.000` : 07/10/2026 21:07:52 UTC — 23:07:52 à Paris, l'instant de la coupure.
+    expect(c.events.emit).toHaveBeenCalledWith(
+      TRACKER_ENGINE_ECHO_EVENT,
+      expect.objectContaining({ deviceTime: '2026-10-07T21:07:52.000Z' }),
     );
   });
 

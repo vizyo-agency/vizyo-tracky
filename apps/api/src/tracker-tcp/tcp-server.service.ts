@@ -268,9 +268,17 @@ export class TcpServerService implements OnModuleInit, OnModuleDestroy {
    * `tryMatch` ne dit pas QUI l'a prise. Rare (commande manuelle de diagnostic sur ce boîtier, à la
    * minute de l'écho) ; la trame reste alors dans `wire_logs` avec son `ack`.
    *
+   * L'heure du BOÎTIER voyage avec l'écho : c'est elle, pas l'heure de réception, qui dit si la
+   * trame répond à la dernière commande ou si elle sort d'un tampon revidé à la reconnexion.
+   *
    * Ne lève jamais : l'ingestion des positions de ce boîtier passe avant tout.
    */
-  private signalerEchoMoteurOrphelin(imei: string, socket: TrackerSocket, raw: string): void {
+  private signalerEchoMoteurOrphelin(
+    imei: string,
+    socket: TrackerSocket,
+    raw: string,
+    deviceTime: Date | null | undefined,
+  ): void {
     const action = lireEchoMoteur(imei, raw);
     if (!action || !this.events) return;
     const inscrite = this.registry.get(imei);
@@ -282,7 +290,8 @@ export class TcpServerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     try {
-      const evt: TrackerEngineEchoEvent = { imei, action, raw, at: new Date().toISOString() };
+      const heure = deviceTime && !Number.isNaN(deviceTime.getTime()) ? deviceTime.toISOString() : null;
+      const evt: TrackerEngineEchoEvent = { imei, action, raw, at: new Date().toISOString(), deviceTime: heure };
       this.events.emit(TRACKER_ENGINE_ECHO_EVENT, evt);
     } catch (err) {
       this.logger.warn(
@@ -379,7 +388,7 @@ export class TcpServerService implements OnModuleInit, OnModuleDestroy {
         const accuseSolde = this.ackWaiter.tryMatch(currentImei, frame.raw);
         // 08/10/2026 — un écho moteur qu'aucun guetteur n'a pris (arrivé après ses 15 s, ou avant
         // son inscription) n'est plus perdu : il est diffusé pour être rapproché de la commande.
-        if (!accuseSolde) this.signalerEchoMoteurOrphelin(currentImei, socket, frame.raw);
+        if (!accuseSolde) this.signalerEchoMoteurOrphelin(currentImei, socket, frame.raw, frame.deviceTime);
 
         if (frame.alarm && frame.alarm !== 'none') {
           const tracker = trackerAvantTrame;

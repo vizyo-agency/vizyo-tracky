@@ -44,6 +44,13 @@ const COUPE_POSSIBLE: ReadonlySet<EngineControlCommandDto['status']> = new Set([
   'ACKNOWLEDGED',
 ]);
 
+/**
+ * Au-delà, une coupure encore PENDING n'est plus « en vol » : elle est orpheline (T48 — le bail de
+ * dispatch du serveur est de 60 s) et le serveur la renverra à la prochaine demande. « Couper »
+ * doit alors rester offert, sinon il resterait grisé pour toujours.
+ */
+const PENDING_ORPHELINE_MS = 120_000;
+
 @Component({
   selector: 'app-engine-control-button',
   standalone: true,
@@ -477,7 +484,11 @@ export class EngineControlButtonComponent implements OnInit {
     );
     if (rallumage && new Date(rallumage.createdAt) > new Date(coupe.createdAt)) return 'actif';
     if (coupe.status === 'ACKNOWLEDGED') return 'coupe';
-    return coupe.status === 'SENT_UNCONFIRMED' ? 'non-confirmee' : 'en-vol';
+    if (coupe.status === 'SENT_UNCONFIRMED') return 'non-confirmee';
+    if (coupe.status === 'PENDING' && this._now() - new Date(coupe.createdAt).getTime() > PENDING_ORPHELINE_MS) {
+      return 'non-confirmee';
+    }
+    return 'en-vol';
   });
 
   readonly isCutActive = computed(() => {
@@ -996,11 +1007,21 @@ export class EngineControlButtonComponent implements OnInit {
     return base + this.dormantConfirmNotice();
   });
 
+  /**
+   * Dernier événement temps réel traité pour CE boîtier. La carte des événements est remplacée à
+   * chaque événement de N'IMPORTE QUEL boîtier : sans ce repère, chaque bouton déjà concerné
+   * relisait sa liste à chaque commande de la flotte — 30 boutons × 90 événements dans la vague de
+   * 22:00, assez pour heurter la limite de 100 requêtes par minute et faire échouer la lecture
+   * (l'écran retombe alors sur l'overlay, moins précis). Seul un événement NOUVEAU de ce boîtier
+   * recharge la liste (08/10/2026).
+   */
+  private dernierEvenementTraite: unknown = undefined;
+
   // React to real-time engine command updates for this tracker (field initializer = injection context)
   private readonly engineUpdateEffect = effect(() => {
-    const updates = this.realtime.engineCommandUpdates();
-    const update = updates.get(this.trackerId());
-    if (update) {
+    const update = this.realtime.engineCommandUpdates().get(this.trackerId());
+    if (update && update !== this.dernierEvenementTraite) {
+      this.dernierEvenementTraite = update;
       this.loadRecentCommands();
     }
   });
