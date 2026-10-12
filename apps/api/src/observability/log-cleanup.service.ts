@@ -6,6 +6,7 @@ import { ErrorLogger } from './error-logger.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemActivityService } from '../system-activity/system-activity.service';
 import { assertRetentionWindow } from '../common/retention-guard';
+import { JOURNAL_DEMO } from '../demo/journal-demo';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -17,6 +18,20 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *    refusé, réaffecté telle réservation) — une réservation se discute encore des mois après.
  */
 export const CATEGORIES_JOURNAL_LONGUES = ['MUTATION', 'RESERVATION', 'AGENDA'];
+
+/**
+ * Lignes du journal système qui ne sont PAS des événements mais des marqueurs permanents : elles
+ * ne vieillissent jamais. Le seul aujourd'hui est le marqueur « base de démonstration », posé UNE
+ * fois par le seed et exigé par l'importeur avant toute écriture (`demo-importer.ts`).
+ *
+ * 12/10/2026 (VPS-055) : il était purgé à 30 j comme une ligne `DEMO` ordinaire — le seed datait
+ * du 07/09, l'import du 11/10 a refusé d'écrire et la démo est restée figée. Ajouter `DEMO` aux
+ * catégories longues n'aurait fait que repousser la panne à 365 j : c'est le marqueur seul qu'on
+ * épargne, les autres lignes `DEMO` (demandes, passages) suivent la rétention courante.
+ */
+export const MARQUEURS_PERMANENTS = {
+  NOT: { category: JOURNAL_DEMO.categorie, action: JOURNAL_DEMO.marqueur },
+};
 
 @Injectable()
 export class LogCleanupService {
@@ -66,10 +81,18 @@ export class LogCleanupService {
       // catégories d'audit (MUTATION, RESERVATION, AGENDA) qui ont la leur, plus longue
       // (valeur d'audit : « qui a fait quoi » doit survivre au journal courant).
       this.prisma.systemActivityLog.deleteMany({
-        where: { createdAt: { lt: errorThreshold }, category: { notIn: CATEGORIES_JOURNAL_LONGUES } },
+        where: {
+          createdAt: { lt: errorThreshold },
+          category: { notIn: CATEGORIES_JOURNAL_LONGUES },
+          ...MARQUEURS_PERMANENTS,
+        },
       }),
       this.prisma.systemActivityLog.deleteMany({
-        where: { createdAt: { lt: mutationThreshold }, category: { in: CATEGORIES_JOURNAL_LONGUES } },
+        where: {
+          createdAt: { lt: mutationThreshold },
+          category: { in: CATEGORIES_JOURNAL_LONGUES },
+          ...MARQUEURS_PERMANENTS,
+        },
       }),
       // Journaux SMS (numeros + contenu). smsDays=0 => desactive : on ne supprime rien.
       smsDays > 0

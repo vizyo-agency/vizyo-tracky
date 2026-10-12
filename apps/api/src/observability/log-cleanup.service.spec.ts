@@ -83,9 +83,10 @@ describe('LogCleanupService — rétention des journaux SMS', () => {
  * du journal courant.
  */
 describe('LogCleanupService — rétention du journal système (fil Agenda)', () => {
-  /** Rejoue un `where` Prisma { createdAt: { lt }, category: … } sur une ligne en mémoire. */
-  function supprimee(where: any, ligne: { category: string; createdAt: Date }): boolean {
+  /** Rejoue un `where` Prisma { createdAt: { lt }, category: …, NOT: {…} } sur une ligne en mémoire. */
+  function supprimee(where: any, ligne: { category: string; action?: string; createdAt: Date }): boolean {
     if (!(ligne.createdAt < where.createdAt.lt)) return false;
+    if (where.NOT && Object.entries(where.NOT).every(([k, v]) => (ligne as any)[k] === v)) return false;
     const c = where.category;
     if (typeof c === 'string') return ligne.category === c;
     if (c?.in) return c.in.includes(ligne.category);
@@ -94,13 +95,13 @@ describe('LogCleanupService — rétention du journal système (fil Agenda)', ()
     return true;
   }
 
-  function purge(lignes: { category: string; ageDays: number }[]) {
+  function purge(lignes: { category: string; action?: string; ageDays: number }[]) {
     const { service, prisma } = makeService();
     return service.cleanupLogs().then(() => {
       const wheres = prisma.systemActivityLog.deleteMany.mock.calls.map((c: any[]) => c[0].where);
       const now = Date.now();
       return lignes.map((l) => {
-        const ligne = { category: l.category, createdAt: new Date(now - l.ageDays * DAY) };
+        const ligne = { category: l.category, action: l.action, createdAt: new Date(now - l.ageDays * DAY) };
         return { ...l, purgee: wheres.some((w: any) => supprimee(w, ligne)) };
       });
     });
@@ -130,6 +131,30 @@ describe('LogCleanupService — rétention du journal système (fil Agenda)', ()
       { category: 'RESERVATION', ageDays: 364 },
     ]);
     expect(r.map((x) => x.purgee)).toEqual([true, true, false]);
+  });
+
+  // VPS-055 (12/10/2026) : le marqueur posé par le seed le 07/09 a été purgé à 30 j, et l'import
+  // de la démo du 11/10 a refusé d'écrire dans une base « non marquée ».
+  it('le marqueur « base de démonstration » n’est JAMAIS purgé, même à 400 j ; les autres lignes DEMO le sont', async () => {
+    const r = await purge([
+      { category: 'DEMO', action: 'base_de_demonstration', ageDays: 35 },
+      { category: 'DEMO', action: 'base_de_demonstration', ageDays: 400 },
+      { category: 'DEMO', action: 'refresh_done', ageDays: 31 },
+      { category: 'DEMO', action: 'refresh_requested', ageDays: 31 },
+      { category: 'DEMO', action: 'refresh_done', ageDays: 29 },
+    ]);
+    expect(r.map((x) => [x.action, x.ageDays, x.purgee])).toEqual([
+      ['base_de_demonstration', 35, false],
+      ['base_de_demonstration', 400, false],
+      ['refresh_done', 31, true],
+      ['refresh_requested', 31, true],
+      ['refresh_done', 29, false],
+    ]);
+  });
+
+  it('l’exemption vise le COUPLE catégorie + action : une action homonyme hors DEMO reste purgée', async () => {
+    const r = await purge([{ category: 'EMAIL', action: 'base_de_demonstration', ageDays: 31 }]);
+    expect(r[0].purgee).toBe(true);
   });
 
   it('les deux purges du journal système sont DISJOINTES (aucune catégorie visée deux fois)', async () => {
