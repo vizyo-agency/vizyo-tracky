@@ -53,6 +53,16 @@ const productLd = () => ({ '@context': 'https://schema.org', '@type': 'Product',
 const localBizLd = (c, out) => ({ '@context': 'https://schema.org', '@type': 'LocalBusiness', name: `Vizyo Tracky — ${c.name}`, description: `Installation de traceurs GPS de flotte à ${c.name} (${c.dept}) et dans tout le département. Géolocalisation temps réel, coupure moteur, support local.`, url: abs(out), telephone: site.phoneE164, email: site.email, priceRange: '€€', areaServed: { '@type': 'City', name: c.name }, address: { '@type': 'PostalAddress', addressLocality: c.name, addressRegion: 'Occitanie', addressCountry: 'FR' }, geo: { '@type': 'GeoCoordinates', latitude: c.lat, longitude: c.lng } });
 const HOME = { name: 'Accueil', out: 'index.html' };
 
+// ── Maillage local : cities.mjs reste la source unique des pages villes ──
+const cityPin = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>';
+const generatedCities = cities.filter((city) => city.generate);
+const toulouse = generatedCities.find((city) => city.slug === 'toulouse');
+const otherCities = generatedCities.filter((city) => city.slug !== 'toulouse');
+const REGION_CITY_LINKS = `${toulouse ? `<a href="gps-flotte-${toulouse.slug}.html" style="display:flex;align-items:center;justify-content:space-between;gap:20px;background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 38%,transparent);border-radius:16px;padding:22px 24px;margin-bottom:18px;transition:transform .2s,border-color .2s" data-vth="transform:translateY(-2px);border-color:var(--accent)"><span><span style="display:block;font-family:'JetBrains Mono',monospace;font-size:.68rem;letter-spacing:.13em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:6px">Notre base locale · ${esc(toulouse.dept)}</span><strong style="display:block;font-size:1.08rem;color:var(--tx)">Découvrir notre solution de suivi de flotte à ${esc(toulouse.name)}</strong></span><span style="display:flex;flex:none;color:var(--accent)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span></a>` : ''}
+<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:10px">
+${otherCities.map((city) => `<a href="gps-flotte-${city.slug}.html" style="display:inline-flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 16px;font-weight:600;font-size:.92rem;transition:all .2s" data-vth="border-color:var(--accent);color:var(--accent)">${cityPin}Voir l'offre locale à ${esc(city.name)} <span style="color:var(--tx3);font-weight:500">· ${esc(city.deptNum)}</span></a>`).join('\n')}
+</div>`;
+
 // ── <head> SEO (le design fournit polices + styles via son <helmet>) ──
 function seoHead({ title, description, canonical, jsonld = [], geo, robots }) {
   const img = abs(site.ogImage);
@@ -185,6 +195,8 @@ function transform(html, out) {
   if (out === 'tarifs.html') body = body.replace(/<section[^>]*id="simulateur"[\s\S]*?<\/section>/, SIM_SECTION);
   // Page accueil : remplace la section #demo (2 boutons morts) par le VRAI formulaire lead.
   if (out === 'index.html') body = body.replace(/<section[^>]*id="demo"[\s\S]*?<\/section>/, DEMO_SECTION);
+  // Hub Occitanie : les destinations locales suivent automatiquement cities.mjs.
+  if (out === 'gps-flotte-occitanie.html') body = body.replace('<div data-vt-region-cities></div>', REGION_CITY_LINKS);
   // Répare le lien mort de l'agence en footer (toutes pages).
   body = body.replace(/<a href="#"([^>]*)>vizyoagency\.com<\/a>/g, `<a href="${site.agencyUrl}"$1 target="_blank" rel="noopener">vizyoagency.com</a>`);
   // Phase 3.4 — rebake des prix balisés [data-vt-price] avec la grille ACTIVE (DB si --sync-pricing).

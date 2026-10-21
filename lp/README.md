@@ -7,6 +7,7 @@ La sortie est du **HTML pur** dans `public/`, déployable tel quel.
 ```bash
 node build.mjs           # régénère toutes les pages + sitemap.xml + robots.txt
 node build.mjs --sync-pricing   # idem, mais rebake les prix depuis l'API (source de vérité)
+node verify-links.mjs    # vérifie liens internes, orphelines et profondeur Home → région → villes
 npx serve public -l 3852 # prévisualise sur http://localhost:3852
 ```
 
