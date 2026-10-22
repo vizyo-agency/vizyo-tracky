@@ -345,7 +345,7 @@ for (const c of cities.filter((x) => x.generate)) {
     jsonld: [serviceLd(c, out), crumb([HOME, { name: 'Occitanie', out: 'gps-flotte-occitanie.html' }, { name: c.name, out }]), faqLd(c.slug === 'toulouse' ? TOULOUSE_FAQ : [
       { q: `Installez-vous les boîtiers GPS à ${c.name} ?`, a: `Oui, nous intervenons à ${c.name} et partout ${c.inDept}. Installation sur site sur rendez-vous, réalisée par nos techniciens, avec accompagnement à l'installation.` },
       { q: `Quel est le tarif à ${c.name} ?`, a: `Les mêmes tarifs transparents partout : tout inclus dès ${P.lite.serenite} €/véhicule/an (Tracky Lite) et ${P.pro.serenite} €/an pour Tracky Pro avec coupure moteur — boîtier, SIM et pose compris. Voir le simulateur.` },
-      { q: `Le suivi fonctionne-t-il hors de ${c.name} ?`, a: `Oui, la couverture est nationale (SIM & data incluses). Vos véhicules sont suivis partout en France, pas seulement ${c.inDept}.` },
+      { q: `Le suivi fonctionne-t-il hors de ${c.name} ?`, a: `Oui. Vos véhicules restent visibles sur la carte lorsqu'ils quittent la ville (SIM & data incluses).` },
     ])],
   });
 }
