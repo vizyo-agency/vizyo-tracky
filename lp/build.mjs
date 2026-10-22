@@ -322,6 +322,15 @@ function emit(meta) {
 
 for (const meta of PAGES) emit(meta);
 
+// FAQ propre à Toulouse (A5, 22/10/2026) : IDENTIQUE au texte visible de lp/design/gps-flotte-toulouse.html.
+const TOULOUSE_FAQ = [
+  { q: "Comment installer un traceur GPS sur une flotte à Toulouse ?", a: "L'installation se fait sur site, sur rendez-vous. Nos techniciens posent les boîtiers sur vos véhicules, vous accompagnent à l'installation, puis vos conducteurs sont invités par e-mail à créer leur compte." },
+  { q: "Votre équipe intervient-elle seulement à Toulouse ?", a: "Non. L'équipe est basée à Ramonville-Saint-Agne et accompagne les entreprises de Toulouse et de sa métropole, et nos techniciens interviennent dans toute l'Occitanie, dont la Haute-Garonne." },
+  { q: "Que devient la vie privée d'un salarié qui utilise le véhicule hors du travail ?", a: "Vous définissez le temps de travail du véhicule : en dehors, aucune position n'est enregistrée. Le conducteur voit son cadre horaire et peut passer en mode privé pour un trajet personnel." },
+  { q: "Qui répond après l'installation ?", a: "Le support local est joignable 24 h/24, 7 j/7, par WhatsApp ou par e-mail, pour une question sur l'application, un réglage ou un incident." },
+  { q: "Peut-on immobiliser un véhicule à distance ?", a: "Oui, avec la formule Tracky Pro : la coupure moteur se déclenche à la demande ou sur une plage horaire, à l'arrêt uniquement et jamais en roulant. La formule Tracky Lite est une géolocalisation simple, sans coupure." },
+];
+
 // ── Pages villes (SEO local depuis cities.mjs, contenu depuis le design) ──
 for (const c of cities.filter((x) => x.generate)) {
   const out = `gps-flotte-${c.slug}.html`;
@@ -333,7 +342,7 @@ for (const c of cities.filter((x) => x.generate)) {
       : `Installation de traceurs GPS de flotte à ${c.name} et ${c.inDept} (${c.deptNum}). Géolocalisation temps réel, coupure moteur, alertes. Application française, support local, installation sur site sur rendez-vous.`,
     // Pas de meta geo.* / ICBM : centre-ville sans établissement (décision A2, 22/10/2026).
     // FAQ : textes IDENTIQUES à ceux visibles dans lp/design/gps-flotte-*.html (A4, 22/10/2026).
-    jsonld: [serviceLd(c, out), crumb([HOME, { name: 'Occitanie', out: 'gps-flotte-occitanie.html' }, { name: c.name, out }]), faqLd([
+    jsonld: [serviceLd(c, out), crumb([HOME, { name: 'Occitanie', out: 'gps-flotte-occitanie.html' }, { name: c.name, out }]), faqLd(c.slug === 'toulouse' ? TOULOUSE_FAQ : [
       { q: `Installez-vous les boîtiers GPS à ${c.name} ?`, a: `Oui, nous intervenons à ${c.name} et partout ${c.inDept}. Installation sur site sur rendez-vous, réalisée par nos techniciens, avec accompagnement à l'installation.` },
       { q: `Quel est le tarif à ${c.name} ?`, a: `Les mêmes tarifs transparents partout : tout inclus dès ${P.lite.serenite} €/véhicule/an (Tracky Lite) et ${P.pro.serenite} €/an pour Tracky Pro avec coupure moteur — boîtier, SIM et pose compris. Voir le simulateur.` },
       { q: `Le suivi fonctionne-t-il hors de ${c.name} ?`, a: `Oui, la couverture est nationale (SIM & data incluses). Vos véhicules sont suivis partout en France, pas seulement ${c.inDept}.` },
