@@ -58,9 +58,25 @@ const cityPin = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" str
 const generatedCities = cities.filter((city) => city.generate);
 const toulouse = generatedCities.find((city) => city.slug === 'toulouse');
 const otherCities = generatedCities.filter((city) => city.slug !== 'toulouse');
-const REGION_CITY_LINKS = `${toulouse ? `<a href="gps-flotte-${toulouse.slug}.html" style="display:flex;align-items:center;justify-content:space-between;gap:20px;background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 38%,transparent);border-radius:16px;padding:22px 24px;margin-bottom:18px;transition:transform .2s,border-color .2s" data-vth="transform:translateY(-2px);border-color:var(--accent)"><span><span style="display:block;font-family:'JetBrains Mono',monospace;font-size:.68rem;letter-spacing:.13em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:6px">Notre base locale · ${esc(toulouse.dept)}</span><strong style="display:block;font-size:1.08rem;color:var(--tx)">Découvrir notre solution de suivi de flotte à ${esc(toulouse.name)}</strong></span><span style="display:flex;flex:none;color:var(--accent)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span></a>` : ''}
+// Ancres variées (une par ville, sans gabarit unique) ; repli générique si une ville est ajoutée sans entrée ici.
+const CITY_ANCHORS = {
+  montpellier: 'Solution GPS de flotte à',
+  nimes: 'Suivi de véhicules à',
+  perpignan: 'Traceur GPS pour entreprises à',
+  albi: 'Géolocalisation de véhicules à',
+  montauban: 'GPS pour flottes professionnelles à',
+  tarbes: 'Suivi de flotte à',
+  carcassonne: 'Traceurs GPS de flotte à',
+  rodez: 'Gestion de flotte GPS à',
+  auch: 'Traceur GPS de véhicules à',
+  foix: 'Suivi GPS des véhicules à',
+  cahors: 'Solution de géolocalisation à',
+  mende: 'GPS de flotte professionnelle à',
+};
+const cityAnchor = (city) => `${CITY_ANCHORS[city.slug] || 'Suivi de flotte à'} ${esc(city.name)}`;
+const REGION_CITY_LINKS = `${toulouse ? `<a href="gps-flotte-${toulouse.slug}.html" style="display:flex;align-items:center;justify-content:space-between;gap:20px;background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 38%,transparent);border-radius:16px;padding:22px 24px;margin-bottom:18px;transition:transform .2s,border-color .2s" data-vth="transform:translateY(-2px);border-color:var(--accent)"><span><span style="display:block;font-family:'JetBrains Mono',monospace;font-size:.68rem;letter-spacing:.13em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:6px">Zone desservie depuis Ramonville-Saint-Agne · ${esc(toulouse.dept)}</span><strong style="display:block;font-size:1.08rem;color:var(--tx)">Géolocalisation de flotte à ${esc(toulouse.name)}</strong></span><span style="display:flex;flex:none;color:var(--accent)" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span></a>` : ''}
 <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:10px">
-${otherCities.map((city) => `<a href="gps-flotte-${city.slug}.html" style="display:inline-flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 16px;font-weight:600;font-size:.92rem;transition:all .2s" data-vth="border-color:var(--accent);color:var(--accent)">${cityPin}Voir l'offre locale à ${esc(city.name)} <span style="color:var(--tx3);font-weight:500">· ${esc(city.deptNum)}</span></a>`).join('\n')}
+${otherCities.map((city) => `<a href="gps-flotte-${city.slug}.html" style="display:inline-flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 16px;font-weight:600;font-size:.92rem;transition:all .2s" data-vth="border-color:var(--accent);color:var(--accent)">${cityPin}${cityAnchor(city)} <span style="color:var(--tx3);font-weight:500">· ${esc(city.dept)}</span></a>`).join('\n')}
 </div>`;
 
 // ── <head> SEO (le design fournit polices + styles via son <helmet>) ──
