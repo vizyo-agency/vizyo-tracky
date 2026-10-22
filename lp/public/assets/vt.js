@@ -201,14 +201,14 @@
               // Devis validé → confirmation + relais direct vers la présentation (l'e-mail récap part en parallèle).
               form.innerHTML = '<div style="text-align:center;padding:26px 8px">' + CHECK_BADGE +
                 '<div style="font-size:1.15rem;font-weight:800;margin-bottom:6px">Devis envoyé, merci !</div>' +
-                '<div style="color:var(--tx2);font-size:.95rem;line-height:1.6;max-width:26rem;margin:0 auto 18px">Votre récapitulatif arrive par e-mail. On revient vers vous sous 2h ouvrées pour le finaliser.<br>En attendant, voyez Tracky en action :</div>' +
+                '<div style="color:var(--tx2);font-size:.95rem;line-height:1.6;max-width:26rem;margin:0 auto 18px">Votre récapitulatif arrive par e-mail. On revient vers vous rapidement pour le finaliser.<br>En attendant, voyez Tracky en action :</div>' +
                 '<a href="decouvrir.html" style="display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:var(--accent-ink);font-weight:700;font-size:.95rem;padding:13px 22px;border-radius:11px;text-decoration:none">' +
                 '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Voir la présentation (2 min)</a></div>';
               applyDevisDone();
             } else {
               form.innerHTML = '<div style="text-align:center;padding:26px 8px">' + CHECK_BADGE +
                 '<div style="font-size:1.12rem;font-weight:800;margin-bottom:6px">C\'est envoyé, merci !</div>' +
-                '<div style="color:var(--tx2);font-size:.95rem">Votre demande est bien reçue. Réponse sous 2h ouvrées.</div></div>';
+                '<div style="color:var(--tx2);font-size:.95rem">Votre demande est bien reçue. Nous revenons vers vous rapidement.</div></div>';
             }
           } else { err('Une erreur est survenue. Réessayez, ou contactez-nous directement.'); }
         });
@@ -365,7 +365,7 @@
       el.innerHTML =
         '<button class="vt-pop-x" aria-label="Fermer">&times;</button>' +
         '<h3>Une démo gratuite ?</h3>' +
-        '<p>Laissez vos coordonnées, on vous rappelle sous 2h — sans engagement.</p>' +
+        '<p>Laissez vos coordonnées, on vous rappelle — sans engagement.</p>' +
         '<form novalidate>' +
         '<input name="name" placeholder="Votre nom" autocomplete="name">' +
         '<input name="email" type="email" placeholder="E-mail" autocomplete="email">' +
