@@ -25,6 +25,8 @@
     "verif:icones": "node scripts/verif-icones.mjs",
     "verif:numero-urgence": "node scripts/verif-numero-urgence.mjs",
     "verif:lp-links": "node lp/verify-links.mjs",
+    "lot": "node scripts/lot.mjs",
+    "test:lot": "node --test scripts/lot.test.mjs",
     "verif:migrations": "node scripts/verif-migrations.mjs",
     "verify": "node scripts/verify.mjs",
     "verif:carte-gardes": "node scripts/verif-carte-gardes.mjs",
