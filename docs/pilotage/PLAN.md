@@ -49,7 +49,7 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 
 ### C8 — intégration Vizyo Conductor
 
-`C8.1` choisir puis autoriser l'accès GitHub de Tracky · `C8.2` publier puis fusionner le pilotage
+`C8.1` transférer Tracky vers `vizyo-agency`, protéger `main` et autoriser l'App · `C8.2` publier puis fusionner le pilotage
 `/lot` (PR #139 ouverte) · `C8.3` embaucher et vérifier Agent Lot sans lancer de prompt · `C8.4`
 ajouter la passerelle Action humaine · `C8.5` cartographier les secrets sans leurs valeurs. Ces lots
 restent séparés : accès GitHub, livraison, configuration, interaction humaine et secrets ne partagent

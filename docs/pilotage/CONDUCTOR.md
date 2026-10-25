@@ -34,9 +34,21 @@ ici `vizyo-agency`. Deux chemins existent :
    déplace aucun dépôt, mais rend l'App installable par d'autres comptes. Une App publique installée
    ailleurs ne peut pas redevenir privée tant que ces installations existent.
 
+Audit de transfert du 25/10 : aucune GitHub Action, aucun webhook, secret/variable Actions,
+environnement, Pages, release ou issue ouverte ; une PR ouverte (#139) ; une deploy key d'écriture
+`tracky-deploy@srv1201617` ; dix worktrees locaux qui partagent le même remote ; aucune référence
+opérationnelle à l'ancien owner hors du présent pilotage. Les références historiques à d'anciennes
+PR restent valides grâce aux redirections et ne doivent pas être réécrites. `main` n'est pas protégée.
+
 Ne créer ni second dépôt ni miroir : ils diviseraient les branches et les PR. Ne changer aucun
-remote avant la décision et l'inventaire. Le transfert vers l'organisation est la cible recommandée
-à long terme ; l'App publique est le chemin le moins disruptif à court terme.
+remote avant la décision. Vu cet audit, le transfert vers `vizyo-agency` est recommandé : il aligne
+Tracky sur les trois autres projets Conductor avec peu de surface de migration. Après transfert :
+
+1. ajouter Tracky au périmètre de l'installation existante de l'App ;
+2. protéger `main` avec passage par PR, sans inventer de contrôle CI inexistant ;
+3. mettre à jour le remote partagé puis les réglages du projet Conductor ;
+4. vérifier la deploy key, le clone, la protection et la PR #139 ;
+5. ne fusionner et ne déployer qu'après une décision séparée.
 
 ## Configuration cible d'Agent Lot
 
