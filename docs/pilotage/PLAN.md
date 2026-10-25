@@ -6,7 +6,7 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 
 | Ordre | Lot | État | Commande | Résultat attendu |
 |---:|---|---|---|---|
-| 1 | **S2.1** Relevé Google J+4 | attente jusqu'au 26/10 08:41 Paris | `/lot S2.1 P1` | comparaison honnête avec la baseline du 22/10, sans action Google |
+| 1 | **S2.1** Relevé Google J+4 | attente jusqu'au 26/10 08:41 Paris | action `S2.1-A1`, puis `/lot S2.1 P1` | comparaison honnête avec la baseline du 22/10, sans action Google |
 | 2 | **S2.2** Corrections courtes du site | dépend de S2.1 | `/lot S2.2 P1` | tarif périmé retiré, FAQ visible = JSON-LD, bons liens de footer, nouvelle baseline |
 | 3 | **S2.11** Snippets, PDF et performance | partiel | `/lot S2.11` après redécoupage | finir ce que le sprint du 22/10 n'a pas traité |
 | 4 | **S2.12** Douze villes restantes | décision après mesure | `/lot S2.12` après arbitrage | enrichir, regrouper ou noindexer — jamais douze textes artificiels |
@@ -49,10 +49,11 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 
 ### C8 — intégration Vizyo Conductor
 
-`C8.1` autoriser l'App GitHub sur le dépôt Tracky · `C8.2` publier puis fusionner le pilotage
-`/lot` · `C8.3` embaucher et vérifier Agent Lot sans lancer de prompt. Les trois restent séparés :
-un accès GitHub, une livraison de code et une configuration d'agent ne partagent pas la même
-autorisation. Voir [`CONDUCTOR.md`](CONDUCTOR.md).
+`C8.1` choisir puis autoriser l'accès GitHub de Tracky · `C8.2` publier puis fusionner le pilotage
+`/lot` (PR #139 ouverte) · `C8.3` embaucher et vérifier Agent Lot sans lancer de prompt · `C8.4`
+ajouter la passerelle Action humaine · `C8.5` cartographier les secrets sans leurs valeurs. Ces lots
+restent séparés : accès GitHub, livraison, configuration, interaction humaine et secrets ne partagent
+pas la même autorisation. Voir [`CONDUCTOR.md`](CONDUCTOR.md).
 
 ### P6 — produit TRACKY
 

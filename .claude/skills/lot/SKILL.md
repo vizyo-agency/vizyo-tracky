@@ -14,7 +14,8 @@ Arguments : `$ARGUMENTS`. Sans identifiant, demander lequel.
    exécuter `git fetch origin` et `node scripts/lot.mjs $ARGUMENTS --conductor`.
    Sinon, exécuter `git fetch origin`, puis `node scripts/lot.mjs $ARGUMENTS`.
 3. Si la sortie dit `PAS PRÊT`, `TROP TÔT` ou que la branche courante ne correspond pas, s'arrêter.
-   Dire la dépendance, la date ou le worktree attendu. Ne pas contourner le verrou.
+   Dire la dépendance, la date ou le worktree attendu. Si elle dit `ACTION HUMAINE REQUISE`, suivre
+   le contrat ci-dessous : ce n'est ni un échec ni une validation de code.
 4. Utiliser un worktree par branche. Ne jamais coder dans le dossier partagé ni sur `main`.
    Dans un worktree isolé fourni par Conductor, reprendre la branche distante indiquée ou la créer
    depuis `origin/main`, puis relancer le script. Ne pas créer un worktree imbriqué.
@@ -34,8 +35,27 @@ Faire seulement ce prompt :
 
 Pas de suite complète, relecture globale, PR ou déploiement pendant un prompt. Une tâche de mesure
 peut utiliser le navigateur si son prompt le demande ; elle reste en lecture seule sauf autorisation explicite.
-Agent Lot ne dispose pas du navigateur ni de Search Console : un lot `manual-observation` est refusé
-en mode Conductor, même s'il est autrement prêt.
+
+Tout prompt présent dans un découpage est candidat à Agent Lot : il n'a pas besoin d'une liste blanche
+propre au lot. Les verrous restent le statut, la date, les dépendances, la branche, les prompts déjà
+committés et les actions humaines déclarées. Un prompt absent du découpage reste refusé.
+
+## Action humaine requise
+
+Quand une étape exige un navigateur authentifié, un secret manquant, une décision, une communication
+externe ou un geste de déploiement, ne pas déclarer tout le lot incompatible et ne pas simuler l'action.
+La sortie `/lot` décrit une action avec un identifiant stable, un responsable, une URL éventuelle, une
+preuve attendue, des interdits et le prompt de reprise.
+
+Dans Conductor :
+
+- demander une tâche humaine durable dans Notes/Tâches, distincte de la file des validations Git ;
+- mettre le run en attente d'action sans commit vide et sans le classer en échec ;
+- ne jamais demander qu'un cookie, jeton, mot de passe ou valeur de secret soit copié dans GitHub ;
+- après la preuve attendue, relancer le prompt indiqué ; `/lot` vérifiera le fichier avant de l'autoriser.
+
+Si la version courante de Conductor ne sait pas encore créer cette tâche automatiquement, rendre le bloc
+`ACTION HUMAINE REQUISE` tel quel et s'arrêter. Ne pas contourner avec une fausse validation.
 
 S'arrêter si un fait métier manque, si le prompt déborde nettement de 30 minutes ou si un prompt
 antérieur de la même branche n'a pas de commit. Formuler la décision manquante avec options et recommandation.

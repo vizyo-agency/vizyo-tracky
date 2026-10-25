@@ -22,8 +22,9 @@ Règles non négociables :
 - aucune suite complète, aucune PR et aucune relecture pendant les prompts ; ces gestes arrivent une
   seule fois à la clôture ;
 - `main` ne reçoit pas de commit direct de développement : une branche `lot/<ID>-<slug>` et une PR ;
-- dans Vizyo Conductor, Agent Lot ne pousse jamais lui-même et n'exécute que les prompts marqués
-  `conductor-agent-lot` ; les observations Google, la clôture et le déploiement restent hors agent ;
+- dans Vizyo Conductor, Agent Lot ne pousse jamais lui-même ; tout prompt découpé peut travailler dans
+  le dépôt, tandis qu'un navigateur authentifié, un secret manquant, une décision, une communication
+  externe ou un déploiement produit une `ACTION HUMAINE REQUISE` puis une reprise explicite ;
 - le statut, les dépendances et les critères viennent de `docs/pilotage/plan.json`. Une modification
   faite uniquement dans Asana sera écrasée ou deviendra incohérente.
 

@@ -1,93 +1,114 @@
 # TRACKY dans Vizyo Conductor
 
-> Conductor exécute un prompt de dépôt. Il ne remplace ni les observations Google, ni la décision
-> humaine de pousser, d'ouvrir une PR, de fusionner ou de déployer.
+> Conductor exécute le travail de dépôt et orchestre les interruptions. Une action humaine n'est ni
+> un échec, ni une validation Git : elle a sa propre tâche, sa preuve attendue et son point de reprise.
 
-## Configuration retenue
+## État réel au 25/10/2026
 
 - Projet : `Tracky` — `https://dev.conductor.vizyoagency.com/projects/tracky`
-- Slug : `tracky`
-- Dépôt : `vizyoagency-create/vizyo-tracky@main`
-- Stack : Angular · Node.js · PostgreSQL · Docker
-- Fuseau : Europe/Paris
-- Simulation totale : activée à la création
-- Équipe initiale : Reviewer et Task Manager, plannings en pause
+- Dépôt déclaré : `vizyoagency-create/vizyo-tracky@main`
+- Propriétaire GitHub actuel : compte personnel `vizyoagency-create`
+- Organisation GitHub : `vizyo-agency` ; elle contient `nisiv`, `vizyo-conductor` et `dispocar`, pas Tracky
+- App GitHub : `Vizyo Conductor`, privée et installée uniquement sur `vizyo-agency`
+- Branche de pilotage : `chore/tracky-lot-pilotage`
+- PR de pilotage : `https://github.com/vizyoagency-create/vizyo-tracky/pull/139`, ouverte et non fusionnée
+- Workspace Tracky : bloqué ; Conductor ne peut ni cloner avec son App ni vérifier `main`
+- Stack : Angular · Node.js · PostgreSQL · Docker ; fuseau Europe/Paris
+- Équipe : Reviewer et Task Manager, plannings en pause
+- Coffre Tracky : aucun secret propre au projet ; les secrets de plateforme restent hérités
 
-Configuration cible d'Agent Lot :
+Le dépôt Tracky est public, mais Agent Lot a quand même besoin d'une installation GitHub App pour
+les jetons d'installation, les écritures, les protections de branche et les webhooks. Un clone public
+anonyme ne suffit pas au workflow.
 
-- grade Senior ; modèle Claude Sonnet 5 ; période d'essai de 10 exécutions ;
-- seuil hérité de 70 % ; un seul run simultané ;
+## Décision GitHub à prendre sans précipitation
+
+L'App est privée. GitHub autorise alors son installation uniquement sur le compte qui la possède,
+ici `vizyo-agency`. Deux chemins existent :
+
+1. **Transférer Tracky vers `vizyo-agency`** — cohérent avec NISIV, Dispocar et Conductor. GitHub
+   conserve commits, branches, PR, issues, secrets, deploy keys et webhooks, et redirige l'ancienne
+   URL. Il faut toutefois auditer protections, Actions, Pages/packages, intégrations externes,
+   remotes des worktrees et scripts qui contiennent l'ancien owner avant le transfert.
+2. **Rendre l'App publique, puis l'installer sur `vizyoagency-create` avec Tracky seulement** — ne
+   déplace aucun dépôt, mais rend l'App installable par d'autres comptes. Une App publique installée
+   ailleurs ne peut pas redevenir privée tant que ces installations existent.
+
+Ne créer ni second dépôt ni miroir : ils diviseraient les branches et les PR. Ne changer aucun
+remote avant la décision et l'inventaire. Le transfert vers l'organisation est la cible recommandée
+à long terme ; l'App publique est le chemin le moins disruptif à court terme.
+
+## Configuration cible d'Agent Lot
+
+- grade Senior ; Claude Sonnet 5 ; période d'essai de 10 exécutions ;
+- seuil hérité de 70 % ; parallélisme 1 ;
 - déclencheur manuel uniquement ; aucun planning et aucun webhook GitHub ;
-- le push reste toujours une validation humaine dans Conductor.
+- un worktree isolé par run ; branche `lot/<ID>-<slug>` ;
+- Agent Lot committe mais ne pousse pas ; Conductor propose le push dans Validations ;
+- Reviewer relit la PR ; Merger peut préparer une fusion séparée si cet agent est ensuite embauché ;
+- aucun déploiement ne découle d'un push ou d'une fusion : il exige son propre geste autorisé.
 
-## Blocages constatés le 25/10/2026
+La limitation initiale à `S2.2 P1`–`P4` n'était pas liée au risque du dev. S2.2 était simplement le
+seul lot prêt, découpé et décrit pour Agent Lot. Désormais, tout prompt existant dans un découpage
+est candidat ; statut, date, dépendances, branche et actions humaines continuent de bloquer.
 
-1. Le clonage échoue : l'App GitHub Conductor n'est pas installée dans l'organisation
-   `vizyoagency-create`.
-2. La protection de `main` ne peut donc pas être vérifiée ; Conductor refuse à juste titre
-   l'embauche d'Agent Lot.
-3. Le pilotage `/lot` est dans la branche locale `chore/tracky-lot-pilotage`. Tant qu'elle n'est pas
-   poussée puis fusionnée, un workspace cloné depuis `main` ne possède ni le skill ni le plan.
-4. `S2.1` exige une session Search Console et un navigateur. Agent Lot n'a que GitHub et le
-   filesystem : ce lot reste manuel et en lecture seule.
-5. Le formulaire Agent Lot accepte un lot comme `S2.2` et un prompt `P1`, mais pas `cloture`.
+## Passerelle « Action humaine »
 
-Ne pas contourner ces blocages. L'installation de l'App GitHub change l'accès à un dépôt privé et
-demande une validation humaine explicite.
+Le format cible est `ACTION HUMAINE REQUISE`. Quand `/lot --conductor` le renvoie, l'orchestrateur
+doit créer une tâche dans **Notes → Tâches**, mettre le run en `waiting_action`, puis attendre la
+preuve. La tâche contient :
 
-## Conditions avant le premier run
+- identifiant stable, lot et prompt ;
+- responsable et échéance éventuelle ;
+- type : `authenticated-browser`, `secret`, `decision`, `external-submit` ou `deployment` ;
+- URL à ouvrir ;
+- consignes courtes et gestes interdits ;
+- fichier ou signal attendu ;
+- commande exacte de reprise.
 
-- l'App GitHub a accès au dépôt Tracky ;
-- le workspace Conductor est `prêt` et la protection de `main` est vérifiable ;
-- le présent pilotage est fusionné sur `main` ;
-- Agent Lot est embauché avec la configuration ci-dessus ;
-- `S2.1` est clos dans le dépôt et dans Asana ;
-- `node scripts/lot.mjs S2.2 P1 --conductor` répond `PRÊT` depuis un worktree de test.
+La clôture de la tâche ne doit pas relancer tout le lot. Elle relance uniquement le prompt indiqué,
+sur la même branche distante. La première application est `S2.1-A1` : ouvrir Search Console dans un
+Chrome déjà connecté, relever treize lignes sans action Google, déposer
+`docs/marketing/seo/search-console/2026-10-26/capture-gsc-j4.md`, puis reprendre `S2.1 P1`.
+
+Tant que Conductor ne transforme pas automatiquement le bloc structuré en tâche, l'agent rend le
+bloc et s'arrête. Un humain crée/termine la tâche ; le run n'est pas converti en approbation Git.
+
+## Secrets
+
+Le coffre projet masque les valeurs, accepte un nom de variable, une portée et un grade minimal, et
+journalise lectures d'agents et révélations humaines. Règles Tracky :
+
+- documenter seulement nom, usage, propriétaire, portée, grade minimal et rotation ;
+- ne jamais committer de valeur, cookie, jeton, export de navigateur ou capture portant un compte ;
+- préférer un secret propre au projet à une surcharge globale ;
+- donner le grade minimal réellement nécessaire ;
+- un secret absent produit une action `secret`, avec lien vers le coffre, jamais une demande de le
+  coller dans un prompt ;
+- revoir le journal après les premiers runs puis à chaque élargissement d'agent.
 
 ## Lancer un prompt
 
-Depuis la fiche de l'emploi Agent Lot :
+Avant le premier run : accès GitHub opérationnel, PR #139 fusionnée sur `main`, workspace prêt,
+Agent Lot embauché avec la configuration cible et lot réellement prêt.
+
+Depuis la fiche de l'emploi :
 
 ```text
 Lot     S2.2
 Prompt  P1
 ```
 
-Puis, un prompt à la fois :
+Puis :
 
 1. Conductor fournit un worktree isolé.
-2. Agent Lot reprend `origin/lot/S2.2-corrections-seo-courtes` si elle existe ; sinon il crée cette
-   branche depuis `origin/main`. Il ne crée pas de worktree dans le worktree fourni.
-3. `/lot` vérifie le statut, la date, les dépendances, la compatibilité Conductor et la branche.
-4. L'agent réalise seulement le prompt, lance son test ciblé et produit le commit exact.
-5. L'agent ne pousse pas. Conductor propose le push dans Validations.
-6. Le prompt suivant ne part qu'après approbation du push précédent et présence du commit sur la
-   branche distante.
+2. Agent Lot reprend la branche distante du lot ou la crée depuis `origin/main`, sans worktree imbriqué.
+3. `/lot` vérifie statut, date, dépendances, découpage, action requise, branche et commits antérieurs.
+4. Le prompt produit son test ciblé et son commit exact.
+5. Conductor propose le push ; le prompt suivant attend le commit distant.
+6. Après le dernier prompt, une session dédiée lance `/lot <ID> cloture`.
 
-Ordre prévu pour le premier lot compatible : `S2.2 P1`, `P2`, `P3`, puis `P4`.
-
-## Clôture et livraison
-
-Après le push approuvé de `P4`, ouvrir une session dédiée sur la branche et lancer :
-
-```text
-/lot S2.2 cloture
-```
-
-La clôture exécute la suite complète, les deux relectures, puis prépare la PR. Elle ne fusionne et
-ne déploie rien sans autorisation. Un déploiement marketing reste interdit avant le relevé S2.1 et
-reste régi par `CLAUDE.md` et `deploy.sh` ensuite.
-
-## Lots non compatibles
-
-Un lot est refusé en mode Conductor tant que `plan.json` ne porte pas explicitement :
-
-```json
-"execution": {
-  "mode": "conductor-agent-lot",
-  "prompts": ["P1"]
-}
-```
-
-Les tâches de navigateur, Search Console, GBP, décision humaine, secrets, communication externe ou
-déploiement ne deviennent jamais compatibles par défaut.
+Le formulaire accepte `P1` à `P999`, pas `cloture`. La clôture lance les contrôles complets, les deux
+relectures et prépare la PR. Fusion et déploiement restent des actions distinctes. Jusqu'au
+26/10/2026 à 08:41 Paris, aucun changement SEO, sitemap, Search Console, GBP ou déploiement marketing
+ne doit brouiller la mesure S2.1.

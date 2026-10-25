@@ -41,11 +41,24 @@ test('un backlog ou un lot terminé ne peut pas partir par accident', () => {
   assert.equal(statusGate(all.get('S2.2'), { ready: true }).ready, true);
 });
 
-test('Conductor refuse les observations et les prompts non autorisés', () => {
-  assert.equal(conductorGate(all.get('S2.1'), 'P1').ready, false);
-  assert.equal(conductorGate(all.get('S2.2'), 'P1').ready, true);
-  assert.equal(conductorGate(all.get('S2.2'), 'P99').ready, false);
-  assert.equal(conductorGate(all.get('S2.2'), 'CLOTURE').ready, false);
+test('Conductor distingue action humaine, prompt dépôt et clôture', () => {
+  const s21 = parseDecoupage(readFileSync(join(process.cwd(), 'docs', 'pilotage', 'decoupe', 'S2.1.md'), 'utf8'));
+  const s22 = parseDecoupage(readFileSync(join(process.cwd(), 'docs', 'pilotage', 'decoupe', 'S2.2.md'), 'utf8'));
+  const action = conductorGate(all.get('S2.1'), 'P1', s21, () => false);
+  assert.equal(action.ready, false);
+  assert.equal(action.actionRequired, true);
+  assert.equal(action.action.id, 'S2.1-A1');
+  assert.equal(conductorGate(all.get('S2.1'), 'P1', s21, () => true).ready, true);
+  assert.equal(conductorGate(all.get('S2.2'), 'P1', s22).ready, true);
+  assert.equal(conductorGate(all.get('S2.2'), 'P99', s22).ready, false);
+  assert.equal(conductorGate(all.get('S2.2'), 'CLOTURE', s22).ready, false);
+});
+
+test('un futur lot découpé est compatible sans liste blanche dédiée', () => {
+  const decoupage = {
+    steps: [{ prompts: [{ id: 'P1' }] }],
+  };
+  assert.equal(conductorGate({ id: 'B0.6', execution: {} }, 'P1', decoupage).ready, true);
 });
 
 test('le découpage S2.2 expose quatre prompts complets', () => {

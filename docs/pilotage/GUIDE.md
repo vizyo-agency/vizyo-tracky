@@ -41,6 +41,11 @@ date ou un signal extérieur. `decision` exige une réponse de Youness avant tou
 les gestes, le test, le critère et le message de commit. `cloture` refuse de se déclarer prête si un
 prompt de la branche n'a pas de commit.
 
+Dans Conductor, un prompt découpé est compatible par défaut avec Agent Lot. Si une étape dépend d'un
+navigateur connecté, d'un secret non disponible, d'une décision, d'une communication ou d'un
+déploiement, le lanceur retourne `ACTION HUMAINE REQUISE` avec une preuve attendue et un prompt de
+reprise. Cette action vit dans Notes/Tâches ; elle ne doit pas être maquillée en validation Git.
+
 Un prompt :
 
 1. lit seulement les sources citées ;

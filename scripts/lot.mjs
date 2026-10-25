@@ -47,22 +47,35 @@ export function statusGate(lot, gate) {
   return { ready: false, reason: reasons[lot.status] ?? `STATUT BLOQUANT — ${lot.status}.` };
 }
 
-export function conductorGate(lot, promptId = null) {
-  const execution = lot.execution;
-  if (execution?.mode !== 'conductor-agent-lot') {
-    return {
-      ready: false,
-      reason: execution?.reason ?? 'Ce lot n’est pas explicitement autorisé pour Agent Lot.',
-    };
-  }
+export function conductorGate(lot, promptId = null, decoupage = null, fileExists = existsSync) {
   if (!promptId || promptId === 'CLOTURE') {
     return {
       ready: false,
       reason: 'Agent Lot accepte uniquement un prompt P1 à P999 ; la clôture reste une session dédiée.',
     };
   }
-  if (!(execution.prompts ?? []).includes(promptId)) {
+  const found = findPrompt(decoupage, promptId);
+  if (!decoupage || !found) {
+    return {
+      ready: false,
+      reason: 'Le prompt doit exister dans un découpage avant de partir dans Agent Lot.',
+    };
+  }
+  const execution = lot.execution ?? {};
+  if (execution.prompts?.length && !execution.prompts.includes(promptId)) {
     return { ready: false, reason: `${promptId} n’est pas autorisé dans Conductor pour ce lot.` };
+  }
+  const action = (execution.actions ?? []).find((candidate) => candidate.before_prompt === promptId);
+  if (action) {
+    const output = action.output ? join(REPO, action.output) : null;
+    if (!output || !fileExists(output)) {
+      return {
+        ready: false,
+        actionRequired: true,
+        action,
+        reason: `${action.id} doit être réalisée avant ${promptId}.`,
+      };
+    }
   }
   return { ready: true, reason: null };
 }
@@ -146,11 +159,19 @@ export function validatePlan(plan) {
     ids.add(lot.id);
     if (!plan.statuses?.includes(lot.status)) errors.push(`${lot.id}: statut ${lot.status} inconnu`);
     if (!(lot.done_when?.length > 0)) errors.push(`${lot.id}: done_when vide`);
-    if (lot.execution?.mode === 'conductor-agent-lot') {
+    if (['conductor-agent-lot', 'conductor-assisted'].includes(lot.execution?.mode)) {
       if (!lot.branch) errors.push(`${lot.id}: branche requise pour Conductor`);
       if (!(lot.execution.prompts?.length > 0)) errors.push(`${lot.id}: prompts Conductor vides`);
       for (const prompt of lot.execution.prompts ?? []) {
         if (!/^P\d{1,3}$/.test(prompt)) errors.push(`${lot.id}: prompt Conductor invalide ${prompt}`);
+      }
+      for (const action of lot.execution.actions ?? []) {
+        if (!action.id) errors.push(`${lot.id}: action Conductor sans identifiant`);
+        if (!/^P\d{1,3}$/.test(action.before_prompt ?? '')) errors.push(`${lot.id}: action ${action.id ?? '?'} sans before_prompt valide`);
+        if (!action.type) errors.push(`${lot.id}: action ${action.id ?? '?'} sans type`);
+        if (!action.title) errors.push(`${lot.id}: action ${action.id ?? '?'} sans titre`);
+        if (!action.output) errors.push(`${lot.id}: action ${action.id ?? '?'} sans preuve de sortie`);
+        if (!action.resume_prompt) errors.push(`${lot.id}: action ${action.id ?? '?'} sans prompt de reprise`);
       }
     }
     if (lot.asana_task_id) {
@@ -164,7 +185,7 @@ export function validatePlan(plan) {
       if (dependency === lot.id) errors.push(`${lot.id}: dépend de lui-même`);
     }
     const file = join(DECOUPE_DIR, `${lot.id}.md`);
-    if (lot.execution?.mode === 'conductor-agent-lot' && !existsSync(file)) {
+    if (['conductor-agent-lot', 'conductor-assisted'].includes(lot.execution?.mode) && !existsSync(file)) {
       errors.push(`${lot.id}: découpage requis pour Conductor`);
     }
     if (existsSync(file)) {
@@ -249,6 +270,25 @@ function findPrompt(decoupage, id) {
   return null;
 }
 
+function printHumanAction(lot, action) {
+  console.log(`\n## ACTION HUMAINE REQUISE — ${action.id}`);
+  console.log(`Type : ${action.type}`);
+  console.log(`Responsable : ${action.owner ?? lot.responsible}`);
+  console.log(`Action : ${action.title}`);
+  if (action.url) console.log(`Ouvrir : ${action.url}`);
+  console.log(`Preuve attendue : ${action.output}`);
+  console.log(`Reprise : /lot ${lot.id} ${action.resume_prompt}`);
+  if (action.instructions?.length) {
+    console.log('\nÀ faire');
+    for (const instruction of action.instructions) console.log(`- ${instruction}`);
+  }
+  if (action.forbidden?.length) {
+    console.log('\nInterdit pendant cette action');
+    for (const item of action.forbidden) console.log(`- ${item}`);
+  }
+  console.log('\nConductor doit créer une tâche humaine durable, puis mettre le run en attente. Ce n’est ni un échec ni une approbation de code.');
+}
+
 function main(argv = process.argv.slice(2)) {
   const plan = loadPlan();
   const errors = validatePlan(plan);
@@ -288,18 +328,22 @@ function main(argv = process.argv.slice(2)) {
   const rawMode = argv.slice(1).find((argument) => !String(argument).startsWith('--')) ?? '';
   const mode = String(rawMode).normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
   const conductorMode = argv.includes('--conductor');
-  const conductor = conductorGate(lot, mode ? mode.toUpperCase() : null);
-
-  if (conductorMode && !conductor.ready) {
-    printBrief(lot, states, gate, workflow, decoupage, done);
-    console.log(`\n**NON COMPATIBLE CONDUCTOR** — ${conductor.reason}`);
-    process.exitCode = 3;
-    return;
-  }
+  const conductor = conductorGate(lot, mode ? mode.toUpperCase() : null, decoupage);
 
   if (!gate.ready || !dependenciesReady(states) || !workflow.ready) {
     printBrief(lot, states, gate, workflow, decoupage, done);
     process.exitCode = 3;
+    return;
+  }
+  if (conductorMode && !conductor.ready) {
+    printBrief(lot, states, gate, workflow, decoupage, done);
+    if (conductor.actionRequired) {
+      printHumanAction(lot, conductor.action);
+      process.exitCode = 4;
+    } else {
+      console.log(`\n**NON COMPATIBLE CONDUCTOR** — ${conductor.reason}`);
+      process.exitCode = 3;
+    }
     return;
   }
   if (!mode) {
