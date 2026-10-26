@@ -20,6 +20,8 @@ export function acceptedBranches(lotId) {
 }
 export const HUMAN_ACTION_TYPES = Object.freeze(['authenticated-browser', 'secret', 'decision', 'external-submit', 'deployment']);
 export const EVIDENCE_RULE = 'file_exists_nonempty';
+/** Base de l'historique d'un lot : les prompts « faits » sont les commits de HEAD absents de cette référence. */
+export const BASE_REF = 'origin/main';
 
 const CONDUCTOR_LOT_BRANCH = /^conductor\/agent-lot\/(.+)$/;
 const LOT_BRANCH = /^lot\/([A-Z]\d\.\d+)-([a-z0-9][a-z0-9._-]*)$/;
@@ -271,11 +273,14 @@ export function commitMessage(lot, step, prompt) {
 /**
  * Les prompts d'un lot déjà committés : `[<ID>] P<n> — …` N'IMPORTE OÙ dans le sujet
  * (« contrat: [D3.4] P1 — … » reste reconnu), comme le fait Conductor (`estLeCommitDuPrompt`).
+ * `subjects` = les sujets de `origin/main..HEAD` (aucune fenêtre). Un sujet qui commence par `Revert ` (annulation d'un
+ * commit de prompt) ne compte JAMAIS comme prompt fait (contrat v1.1 § 3).
  */
 export function completedPrompts(lot, subjects) {
   const result = new Set();
   const marker = new RegExp(`\\[${lot.id.replace(/\./g, '\\.')}\\]\\s+(P\\d+)\\s+[—-]`);
   for (const subject of subjects) {
+    if (subject.startsWith('Revert ')) continue;
     const match = marker.exec(subject);
     if (match) result.add(match[1]);
   }
@@ -452,18 +457,22 @@ export function validatePlan(plan, options = {}) {
   return errors;
 }
 
-/** Accès git du poste. `branch()` rend '' pour un HEAD détaché ; toute panne de git LÈVE (jamais « aucun commit »). */
+/**
+ * Accès git du poste. `branch()` rend '' pour un HEAD détaché ; toute panne de git LÈVE (jamais « aucun commit »).
+ * `subjects()` = les sujets de `git log origin/main..HEAD` : les commits de la branche absents de `origin/main`,
+ * SANS fenêtre de N commits (contrat v1.1 § 3, identique côté Conductor). Sans `origin/main`, c'est une panne
+ * (exit 2) : lancer `git fetch origin`, jamais deviner un historique.
+ */
 export function makeGit(repo = REPO) {
-  const run = (args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const run = (args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 }).trim();
   return {
     branch: () => run(['branch', '--show-current']),
     subjects: () => {
       try {
-        return run(['log', '--format=%s', '-n', '2000']).split(/\r?\n/).filter(Boolean);
+        return run(['log', '--format=%s', `${BASE_REF}..HEAD`]).split(/\r?\n/).filter(Boolean);
       } catch (error) {
-        // Une branche sans aucun commit n'a pas d'historique : ce n'est pas une panne de git.
-        if (/does not have any commits yet|unknown revision/.test(String(error.stderr ?? error.message))) return [];
-        throw error;
+        const detail = String(error.stderr ?? error.message).split(/\r?\n/).find((line) => line.trim()) ?? 'erreur inconnue';
+        throw new Error(`historique ${BASE_REF}..HEAD illisible (${detail.trim()}) ; lancer git fetch origin`);
       }
     },
   };

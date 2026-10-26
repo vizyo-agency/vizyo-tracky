@@ -96,8 +96,14 @@ branche du lot, la chercher ailleurs donnerait un faux « absent ».
 - **Historique** : un prompt `P<n>` exige que les prompts qui le précèdent dans le découpage, sur la même
   branche, soient déjà committés (`[<ID>] P<k> — …`, y compris avec un préfixe de sujet) ; un prompt déjà
   committé est refusé (`blocked`). Hors Conductor, `--rejouer` reprend volontairement un prompt committé
-  (il ne lève jamais l'ordre) ; l'option est interdite avec `--conductor`. Le commit peut n'être que local :
-  `lot.mjs` lit l'historique du worktree, pas le dépôt distant.
+  (il ne lève jamais l'ordre) ; l'option est interdite avec `--conductor`. Le commit peut n'être que local.
+  « Prompt déjà committé » = les commits accessibles depuis `HEAD` et absents de `origin/main`
+  (`git log origin/main..HEAD`) : **aucune fenêtre de N commits**, des deux côtés (contrat v1.1 § 3). Un
+  sujet qui commence par `Revert ` ne compte **jamais** comme prompt fait (limite connue : le commit
+  d'origine qu'il annule compte encore ; rejouer un prompt annulé se décide à la main). Sans `origin/main`
+  (jamais récupéré), `lot.mjs` répond `error` (2) en demandant `git fetch origin` au lieu de deviner un
+  historique. Un prompt déjà fusionné dans `origin/main` n'est plus « fait » pour une nouvelle branche :
+  le lot est alors normalement `done` dans le plan.
 - **Action** : quand `status = action_required`, `action` porte `id`, `type`
   (`authenticated-browser`, `secret`, `decision`, `external-submit`, `deployment`), `responsible`, `url`,
   `instructions`, `forbidden`, `evidence_path`, `evidence_rule` (`file_exists_nonempty`),

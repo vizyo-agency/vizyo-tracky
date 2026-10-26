@@ -1053,7 +1053,7 @@ function gitIn(dir, ...args) {
   return execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-function makeRepo({ lots = [lotFixture()], branch = 'conductor/agent-lot/T1.1' } = {}) {
+function makeRepo({ lots = [lotFixture()], branch = 'conductor/agent-lot/T1.1', origin = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'lot-repo-'));
   tempDirs.push(dir);
   mkdirSync(join(dir, 'scripts'), { recursive: true });
@@ -1065,6 +1065,8 @@ function makeRepo({ lots = [lotFixture()], branch = 'conductor/agent-lot/T1.1' }
   gitIn(dir, 'symbolic-ref', 'HEAD', 'refs/heads/main');
   gitIn(dir, 'add', 'scripts/lot.mjs', 'docs/pilotage/plan.json', 'docs/pilotage/decoupe/T1.1.md');
   gitIn(dir, 'commit', '-q', '-m', 'init');
+  // `origin/main` = l'état de la base : les prompts « faits » sont les commits de HEAD qui n'y sont pas.
+  if (origin) gitIn(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
   if (branch === 'detached') gitIn(dir, 'checkout', '-q', '--detach');
   else if (branch !== 'main') gitIn(dir, 'checkout', '-q', '-b', branch);
   return dir;
@@ -1144,5 +1146,84 @@ test('CLI réelle : sans git (pas un dépôt) = erreur 2 et ligne finale, pas «
   assert.equal(result.status, 2);
   assert.equal(result.json.status, 'error');
   assert.match(result.json.reason, /git indisponible/);
+});
+
+// ── Historique : origin/main..HEAD, sans fenêtre, sans « Revert » (contrat v1.1 § 3) ────────────
+function commitFile(dir, name, subject) {
+  writeFileSync(join(dir, name), subject);
+  gitIn(dir, 'add', name);
+  gitIn(dir, 'commit', '-q', '-m', subject);
+}
+
+/** Des commits sans fichier, en un seul processus (git fast-import) : de quoi dépasser 2000 commits en une seconde. */
+function fastImport(dir, ref, from, subjects) {
+  const lines = [];
+  subjects.forEach((subject, index) => {
+    lines.push(`commit ${ref}`, `committer Test <test@example.test> ${1_700_000_000 + index} +0000`, `data ${Buffer.byteLength(subject)}`, subject);
+    if (index === 0) lines.push(`from ${from}`);
+    lines.push('');
+  });
+  execFileSync('git', ['fast-import', '--quiet'], { cwd: dir, input: `${lines.join('\n')}\n`, stdio: ['pipe', 'pipe', 'pipe'] });
+}
+
+test('historique : « Revert … » ne compte jamais comme prompt fait (unitaire et run)', () => {
+  const lot = lotFixture();
+  assert.deepEqual([...completedPrompts(lot, ['Revert "[T1.1] P1 — Premier prompt"'])], []);
+  assert.deepEqual([...completedPrompts(lot, ['Revert [T1.1] P2 — x', FIRST_SUBJECT])], ['P1']);
+  assert.deepEqual([...completedPrompts(lot, ['revert: [T1.1] P3 — minuscule, autre convention'])], ['P3'], 'seul le « Revert » de git est exclu');
+  const reverted = ['Revert "[T1.1] P1 — Premier prompt"'];
+  assert.equal(plain(['T1.1', 'P1'], { subjects: reverted }).exitCode, 0, 'P1 reste à faire');
+  const second = plain(['T1.1', 'P2'], { subjects: reverted });
+  assert.equal(second.exitCode, 3);
+  assert.match(second.stdout, /ORDRE DES PROMPTS — P2 exige d’abord P1/);
+});
+
+test('historique (git réel) : seuls les commits absents de origin/main comptent, et un Revert ne compte pas', () => {
+  const dir = makeRepo({ branch: 'main' });
+  commitFile(dir, 'a.txt', FIRST_SUBJECT);
+  gitIn(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD'); // P1 est déjà dans la base
+  gitIn(dir, 'checkout', '-q', '-b', 'conductor/agent-lot/T1.1');
+  assert.equal(cli(dir, ['T1.1', 'P1', '--conductor']).json.status, 'ready', 'P1 est dans origin/main : pas un prompt de cette branche');
+  assert.match(cli(dir, ['T1.1', 'P2', '--conductor']).json.reason, /ORDRE DES PROMPTS — P2 exige d’abord P1/);
+  commitFile(dir, 'b.txt', FIRST_SUBJECT);
+  assert.match(cli(dir, ['T1.1', 'P1', '--conductor']).json.reason, /déjà committé/);
+  assert.equal(cli(dir, ['T1.1', 'P2', '--conductor']).json.status, 'ready');
+  commitFile(dir, 'c.txt', `Revert "${FIRST_SUBJECT}"`);
+  assert.match(cli(dir, ['T1.1', 'P1', '--conductor']).json.reason, /déjà committé/, 'le commit d’origine compte toujours (limite connue : voir CONDUCTOR.md)');
+  const onlyRevert = makeRepo();
+  commitFile(onlyRevert, 'a.txt', `Revert "${FIRST_SUBJECT}"`);
+  assert.equal(cli(onlyRevert, ['T1.1', 'P1', '--conductor']).json.status, 'ready');
+});
+
+test('historique (git réel) : aucune fenêtre — un prompt committé il y a plus de 2000 commits est toujours vu', () => {
+  const dir = makeRepo({ branch: 'main' });
+  const base = gitIn(dir, 'rev-parse', 'HEAD');
+  const filler = Array.from({ length: 2100 }, (_, index) => `chore: remplissage ${index}`);
+  fastImport(dir, 'refs/heads/conductor/agent-lot/T1.1', base, [FIRST_SUBJECT, ...filler]);
+  gitIn(dir, 'checkout', '-q', 'conductor/agent-lot/T1.1');
+  assert.equal(Number(gitIn(dir, 'rev-list', '--count', 'origin/main..HEAD')), 2101);
+  const again = cli(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(again.status, 3, again.stdout);
+  assert.match(again.json.reason, /déjà committé/);
+  assert.equal(cli(dir, ['T1.1', 'P2', '--conductor']).json.status, 'ready', 'P1 est vu : P2 est autorisé');
+});
+
+test('historique (git réel) : sans origin/main, erreur (2) qui dit quoi faire — jamais un historique deviné', () => {
+  const dir = makeRepo({ origin: false });
+  const result = cli(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.status, 'error');
+  assert.ok(result.json.reason.includes('origin/main..HEAD'), result.json.reason);
+  assert.ok(result.json.reason.includes('git fetch origin'), result.json.reason);
+});
+
+test('CLI réelle : la clôture se lance sur conductor/agent-lot/<ID> une fois les trois prompts committés', () => {
+  const dir = makeRepo({ lots: [lotFixture({ status: 'done' })], branch: 'conductor/agent-lot/T1.1' });
+  assert.equal(cli(dir, ['T1.1', 'cloture']).status, 3, 'rien de committé : TERMINÉ');
+  for (const [index, subject] of [FIRST_SUBJECT, SECOND_SUBJECT, THIRD_SUBJECT].entries()) commitFile(dir, `f${index}.txt`, subject);
+  const closing = cli(dir, ['T1.1', 'cloture']);
+  assert.equal(closing.status, 0, closing.stdout);
+  assert.match(closing.stdout, /PRÊTE/);
+  assert.equal(cli(dir, ['T1.1', 'cloture', '--conductor']).status, 3, 'jamais depuis Conductor');
 });
 
