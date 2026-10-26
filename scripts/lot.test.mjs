@@ -1300,6 +1300,16 @@ test('plan : un lot Conductor non listé dans execution.prompts est refusé (blo
   assert.match(json.reason, /n’est pas autorisé dans Conductor/);
 });
 
+test('CI : les actions tierces du workflow du pilotage sont épinglées par SHA de commit, avec le tag en commentaire', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/pilotage.yml', import.meta.url), 'utf8');
+  const uses = workflow.split('\n').filter((line) => /^\s*uses:/.test(line));
+  assert.ok(uses.length >= 2);
+  for (const line of uses) assert.match(line, /uses: [\w.-]+\/[\w.-]+@[0-9a-f]{40} # v\d+(?:\.\d+){0,2}\s*$/, line);
+  assert.match(workflow, /^permissions:\n  contents: read$/m);
+  assert.match(workflow, /persist-credentials: false/);
+  assert.ok(!/pull_request_target/.test(workflow));
+});
+
 test('plan réel : valide, et chaque découpage du dépôt se lit sans erreur', () => {
   const plan = loadPlan();
   assert.deepEqual(validatePlan(plan), []);

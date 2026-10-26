@@ -1,6 +1,7 @@
 # CI minimale du pilotage par lots (`/lot`). Lecture seule : aucun secret, aucune écriture, aucun déploiement.
 # Elle ne remplace pas `pnpm verify` (qui exige base, Docker et dépendances) : elle garde seulement le plan,
 # le lanceur `scripts/lot.mjs` et la landing statique, qui n'ont besoin que de Node.
+# Les actions tierces sont épinglées par SHA de commit (le tag est en commentaire) : un tag flottant peut être réécrit.
 name: Pilotage
 
 on:
@@ -27,11 +28,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Récupérer le code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Installer Node (version du dépôt)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: '.nvmrc'
       - name: Tests du lanceur /lot
