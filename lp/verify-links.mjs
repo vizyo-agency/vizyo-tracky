@@ -133,6 +133,25 @@ const indexedPages = [...sitemap.matchAll(/<loc>(.*?)<\/loc>/g)].map((match) => 
 const orphans = indexedPages.filter((page) => !depth.has(page));
 assert(orphans.length === 0, `Pages indexables orphelines depuis la Home : ${orphans.join(', ')}`);
 
+// Feuille Google Fonts non bloquante (lot S2.11 P1) : jamais en rel="stylesheet" hors d'un <noscript>.
+// decouvrir-depot.html n'a pas de source dans lp/design/ et n'est pas régénéré par build.mjs : hors périmètre ici.
+for (const file of htmlFiles.filter((f) => f !== 'decouvrir-depot.html')) {
+  const html = readFileSync(join(publicDir, file), 'utf8');
+  const noscriptFree = html.replace(/<noscript>[\s\S]*?<\/noscript>/gi, '');
+  const blocking = /<link[^>]*href="https:\/\/fonts\.googleapis\.com\/css2\?[^"]*"[^>]*rel="stylesheet"[^>]*>/i.test(noscriptFree);
+  assert(!blocking, `${file} charge la feuille Google Fonts en rel="stylesheet" bloquant hors d'un <noscript>.`);
+}
+
+// PDF DPA : reste téléchargeable, mais non indexé (lot S2.11 P3).
+const nginxConf = readFileSync(join(root, '..', 'deploy', 'vps', 'nginx.lp.conf'), 'utf8');
+const dpaBlockMatch = nginxConf.match(/location\s*=\s*\/vizyo-tracky-dpa-fiche-securite\.pdf\s*\{([\s\S]*?)\}/);
+assert(dpaBlockMatch, 'deploy/vps/nginx.lp.conf doit contenir un bloc location = /vizyo-tracky-dpa-fiche-securite.pdf.');
+const dpaBlock = dpaBlockMatch[1];
+assert(/add_header\s+X-Robots-Tag\s+"noindex,\s*follow"\s+always;/.test(dpaBlock), 'Le bloc du PDF DPA doit poser X-Robots-Tag "noindex, follow" always.');
+assert(/add_header\s+X-Frame-Options\s+"SAMEORIGIN"\s+always;/.test(dpaBlock), 'Le bloc du PDF DPA doit répéter X-Frame-Options "SAMEORIGIN" always.');
+assert(/add_header\s+X-Content-Type-Options\s+"nosniff"\s+always;/.test(dpaBlock), 'Le bloc du PDF DPA doit répéter X-Content-Type-Options "nosniff" always.');
+
+console.log('✓ PDF DPA : noindex posé en nginx, sans retirer les en-têtes de sécurité');
 console.log(`✓ ${generatedCities.length} pages villes reliées depuis Occitanie`);
 console.log('✓ Occitanie à profondeur 1 ; Toulouse et les autres villes à profondeur 2 maximum');
 console.log(`✓ ${indexedPages.length} pages indexables accessibles depuis la Home, sans orpheline`);
