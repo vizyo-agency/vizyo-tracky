@@ -66,6 +66,15 @@ répond « illisible » : c'est un arrêt sûr, pas une panne.
 
 Ces valeurs sont la cible ; leur état réel est **à vérifier sur l'instance**.
 
+**Concurrence et durée : l'affaire de Conductor, pas de `lot.mjs`.** « Un seul run à la fois pour un lot » est
+garanti (ou non) par Conductor, qui est le seul à connaître les runs en cours. Un run `running` n'expire pas
+par l'âge : le considérer comme terminé au bout d'une durée fixe (une fenêtre de quelques heures, par exemple)
+rouvrirait la porte à deux exécutions sur la même branche pendant un run réellement long, et ce n'est pas un
+choix que ce dépôt fait. Côté `lot.mjs`, **aucune fenêtre de temps cachée** (OBSERVÉ le 26/10 par lecture et
+par un test) : la seule horloge est le verrou `not_before` d'un lot ou d'une action ; l'historique git est lu
+sans borne de date ni de nombre de commits (`origin/main..HEAD`), et à `not_before` près le résultat est le même
+à toute heure. Un run bloqué se traite donc par son statut dans Conductor, pas par l'attente.
+
 La limitation initiale à `S2.2 P1`–`P4` n'était pas liée au risque du dev. S2.2 était simplement le
 seul lot prêt, découpé et décrit pour Agent Lot. Désormais, tout prompt existant dans un découpage
 est candidat ; statut, date, dépendances, branche, ordre des prompts et actions humaines continuent

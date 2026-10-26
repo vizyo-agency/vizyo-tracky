@@ -2157,3 +2157,36 @@ test('m15 : action.not_before — ISO avec décalage de Paris, canonique, valeur
     assert.equal(payload({ not_before: undefined }, { not_before: value }).not_before.slice(0, 10), day, value);
   }
 });
+
+// ── m17 : aucune fenêtre de temps cachée dans lot.mjs — la concurrence relève de Conductor ──────
+test('m17 : lot.mjs n’a aucune fenêtre de temps cachée (source) — la seule horloge est le verrou not_before', () => {
+  const source = readFileSync(new URL('./lot.mjs', import.meta.url), 'utf8');
+  assert.ok(!/Date\.now\s*\(/.test(source), 'pas de Date.now()');
+  assert.ok(!/\bsetTimeout\b|\bsetInterval\b|performance\.now/.test(source), 'pas de minuterie');
+  assert.ok(!/--since|--after|--until|--before|--max-count|--max-age|'-n'|"-n"/.test(source), 'git est lu sans borne de date ni de nombre de commits');
+  assert.ok(!/\b(?:FENETRE|WINDOW|MAX_AGE|TTL|EXPIR\w*)\b/i.test(source), 'aucune constante de fenêtre ou d’expiration');
+  // `new Date()` sans argument = l'horloge réelle : une seule occurrence, la valeur par défaut de `now` (verrou not_before).
+  assert.equal([...source.matchAll(/new Date\(\)/g)].length, 2, 'dateGate(now = new Date()) et le défaut de run()');
+  assert.match(source, /export function dateGate\(lot, now = new Date\(\)\)/);
+  assert.match(source, /const now = env\.now \?\? new Date\(\);/);
+  // `now` n'est consommé que par dateGate.
+  assert.equal([...source.matchAll(/\bdateGate\(lot, now\)/g)].length, 1);
+});
+
+test('m17 : sans not_before, le résultat ne dépend pas de l’heure — ni l’âge d’un run ni celui des commits ne comptent', () => {
+  const snapshots = [new Date('2001-01-01T00:00:00Z'), new Date('2026-10-26T09:00:00Z'), new Date('2999-12-31T23:59:59Z')].map((now) => {
+    const ready = conductor(['T1.1', 'P2'], { now, subjects: [FIRST_SUBJECT] });
+    const done = conductor(['T1.1', 'P1'], { now, subjects: [FIRST_SUBJECT] });
+    return JSON.stringify([ready.stdout, ready.exitCode, done.stdout, done.exitCode]);
+  });
+  assert.equal(new Set(snapshots).size, 1, 'même sortie à 2001, 2026 et 2999');
+  // Git réel : un commit de prompt daté de 2001 (ou de 2050) est vu comme un commit de prompt récent.
+  for (const date of ['2001-01-01T00:00:00Z', '2050-01-01T00:00:00Z']) {
+    const dir = makeRepo({ branch: 'conductor/agent-lot/T1.1' });
+    writeFileSync(join(dir, 'p1.txt'), 'p1');
+    gitIn(dir, 'add', 'p1.txt');
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', FIRST_SUBJECT], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }, stdio: 'pipe' });
+    assert.match(cli(dir, ['T1.1', 'P1', '--conductor']).json.reason, /déjà committé/, date);
+    assert.equal(cli(dir, ['T1.1', 'P2', '--conductor']).json.status, 'ready', date);
+  }
+});
