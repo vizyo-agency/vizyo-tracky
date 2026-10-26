@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
@@ -14,13 +14,16 @@ import {
   dateGate,
   dependenciesReady,
   dependencyStates,
+  inspectEvidence,
   loadPlan,
   lotMap,
   parseDecoupage,
+  parseNotBefore,
   promptsBefore,
   run,
   statusGate,
   validatePlan,
+  validateRelativePath,
 } from './lot.mjs';
 
 // ── Fixtures : aucun test de ce bloc ne lit le plan réel du dépôt ─────────────────────────────
@@ -493,6 +496,222 @@ test('ordre : promptsBefore ignore les prompts d’une autre branche et suit l�
   assert.deepEqual(promptsBefore(split, lot, 'P3'), []);
   assert.deepEqual(promptsBefore(parseDecoupage(decoupageText()), lot, 'P3'), ['P1', 'P2']);
   assert.deepEqual(promptsBefore(parseDecoupage(decoupageText()), lot, 'P9'), []);
+});
+
+// ── Preuve d'action humaine, chemins et dates ─────────────────────────────────────────────────
+const EVIDENCE = 'docs/preuve/releve.md';
+const ACTION = {
+  id: 'T1.1-A1',
+  before_prompt: 'P1',
+  type: 'authenticated-browser',
+  title: 'Relever les chiffres dans un outil connecté',
+  owner: 'Alice',
+  url: 'https://example.test/outil',
+  output: EVIDENCE,
+  resume_prompt: 'P1',
+  instructions: ['Relever les chiffres', 'Déposer le fichier'],
+  forbidden: ['Copier un cookie'],
+};
+
+function actionLot(overrides = {}) {
+  return lotFixture({
+    status: 'waiting',
+    not_before: '2026-05-01T09:00:00+02:00',
+    execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [ACTION] },
+    ...overrides,
+  });
+}
+
+function conductorWith(args, env) {
+  const result = run([...args, '--conductor'], env);
+  const last = result.stdout.trimEnd().split('\n').at(-1);
+  assert.ok(last.startsWith('CONDUCTOR_RESULT '), `dernière ligne inattendue : ${last}`);
+  return { ...result, json: JSON.parse(last.slice('CONDUCTOR_RESULT '.length)) };
+}
+
+function writeEvidence(env, content, path = EVIDENCE) {
+  const full = join(env.repo, path);
+  mkdirSync(join(full, '..'), { recursive: true });
+  writeFileSync(full, content);
+  return full;
+}
+
+test('action humaine : preuve absente = action_required (4), payload complet, rien de secret', () => {
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+  const { json, exitCode, stdout } = conductorWith(['T1.1', 'P1'], env);
+  assert.equal(exitCode, 4);
+  assert.equal(json.status, 'action_required');
+  assert.equal(json.exit_code, 4);
+  assert.match(json.reason, /T1\.1-A1 doit être réalisée avant P1/);
+  assert.deepEqual(json.action, {
+    id: 'T1.1-A1',
+    type: 'authenticated-browser',
+    responsible: 'Alice',
+    url: 'https://example.test/outil',
+    instructions: ['Relever les chiffres', 'Déposer le fichier'],
+    forbidden: ['Copier un cookie'],
+    evidence_path: EVIDENCE,
+    evidence_rule: 'file_exists_nonempty',
+    resume_command: '/lot T1.1 P1',
+    not_before: '2026-05-01T09:00:00+02:00',
+  });
+  assert.equal(json.commit_message, FIRST_SUBJECT);
+  assert.match(stdout, /## ACTION HUMAINE REQUISE — T1\.1-A1/);
+  assert.ok(!/\*\*PRÊT\*\*/.test(stdout), 'le brief ne doit pas dire PRÊT quand une action est requise');
+});
+
+test('action humaine : hors --conductor, la porte de preuve ne s’applique pas', () => {
+  const env = fixtureEnv({ lots: [actionLot()] });
+  assert.equal(run(['T1.1', 'P1'], env).exitCode, 0);
+});
+
+test('action humaine : preuve non vide dans le dépôt = ready', () => {
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+  writeEvidence(env, '| Pages indexées | 0 |\n');
+  const { json, exitCode } = conductorWith(['T1.1', 'P1'], env);
+  assert.equal(exitCode, 0);
+  assert.equal(json.status, 'ready');
+  assert.equal(json.action, null);
+});
+
+test('action humaine : un fichier de preuve VIDE ou fait de blancs ne passe pas', () => {
+  for (const content of ['', '   \n\t\n']) {
+    const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+    writeEvidence(env, content);
+    const { json, exitCode } = conductorWith(['T1.1', 'P1'], env);
+    assert.equal(exitCode, 4, JSON.stringify(content));
+    assert.equal(json.status, 'action_required');
+    assert.match(json.reason, /vide/);
+  }
+});
+
+test('action humaine : un dossier à la place du fichier ne passe pas', () => {
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+  mkdirSync(join(env.repo, EVIDENCE), { recursive: true });
+  assert.equal(conductorWith(['T1.1', 'P1'], env).exitCode, 4);
+});
+
+test('action humaine : un lien symbolique qui sort du dépôt ne passe pas, un lien interne oui', (t) => {
+  const outside = mkdtempSync(join(tmpdir(), 'lot-outside-'));
+  tempDirs.push(outside);
+  writeFileSync(join(outside, 'secret.md'), 'contenu hors dépôt');
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+  const full = join(env.repo, EVIDENCE);
+  mkdirSync(join(full, '..'), { recursive: true });
+  try {
+    symlinkSync(join(outside, 'secret.md'), full);
+  } catch {
+    t.skip('création de lien symbolique non permise sur ce poste');
+    return;
+  }
+  const refused = conductorWith(['T1.1', 'P1'], env);
+  assert.equal(refused.exitCode, 4);
+  assert.match(refused.json.reason, /sort du dépôt/);
+  rmSync(full);
+  writeFileSync(join(env.repo, 'reel.md'), 'preuve réelle');
+  symlinkSync(join(env.repo, 'reel.md'), full);
+  assert.equal(conductorWith(['T1.1', 'P1'], env).exitCode, 0);
+});
+
+test('action humaine : l’ordre des portes — dépendance et date avant l’action, branche avant la preuve', () => {
+  const early = conductor(['T1.1', 'P1'], { lots: [actionLot({ not_before: '2999-01-01T00:00:00+01:00' })], branch: 'conductor/agent-lot/e1' });
+  assert.equal(early.json.status, 'too_early');
+  const detached = conductor(['T1.1', 'P1'], { lots: [actionLot()], branch: '' });
+  assert.equal(detached.json.status, 'blocked');
+  assert.equal(detached.json.action, null);
+});
+
+test('action humaine : le prompt suivant sans action déclarée n’est pas arrêté', () => {
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1', subjects: [FIRST_SUBJECT] });
+  assert.equal(conductorWith(['T1.1', 'P2'], env).json.status, 'ready');
+});
+
+test('action humaine : conductorGate accepte un verdict booléen ou détaillé (tests et appelants historiques)', () => {
+  const lot = actionLot();
+  const decoupage = parseDecoupage(decoupageText());
+  assert.equal(conductorGate(lot, 'P1', decoupage, () => false).actionRequired, true);
+  assert.equal(conductorGate(lot, 'P1', decoupage, () => true).ready, true);
+  assert.equal(conductorGate(lot, 'P1', decoupage, () => ({ ok: false, reason: 'vide' })).reason.includes('vide'), true);
+  assert.equal(conductorGate(lot, 'P1', decoupage, (path) => ({ ok: path === EVIDENCE })).ready, true);
+});
+
+test('chemins : validateRelativePath rejette absolu, .., antislash, lecteur, flux NTFS, segments vides', () => {
+  assert.equal(validateRelativePath('docs/a/preuve.md'), null);
+  assert.equal(validateRelativePath('a.md'), null);
+  for (const bad of ['', '  ', '/etc/hosts', '../x', 'a/../../x', 'a/..', 'C:\\x', 'C:/x', '\\\\serveur\\partage', 'a\\b', 'a//b', './a', 'a/./b', 'a/', 'fichier.md:flux', 'a\0b', ' a.md', 'a?.md']) {
+    assert.notEqual(validateRelativePath(bad), null, JSON.stringify(bad));
+  }
+  assert.notEqual(validateRelativePath(undefined), null);
+  assert.notEqual(validateRelativePath(42), null);
+});
+
+test('chemins : inspectEvidence rejette un chemin invalide avant tout accès disque', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'lot-repo-'));
+  tempDirs.push(repo);
+  for (const bad of ['../hors.md', '/tmp/x', 'a/../../b']) {
+    const verdict = inspectEvidence(repo, bad);
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.reason, /chemin de preuve invalide/);
+  }
+  assert.equal(inspectEvidence(repo, 'absent.md').reason, 'fichier de preuve absent');
+});
+
+test('validation (--check) : un champ output avec .. ou absolu est rejeté', () => {
+  for (const output of ['../../../etc/hosts', '/etc/hosts', 'C:\\Windows\\x', 'a\\b.md', 'docs/../../x']) {
+    const lot = lotFixture({ execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [{ ...ACTION, output }] } });
+    const errors = validatePlan({ statuses: STATUSES, lots: [lot] }, { decoupeDir: join(fixtureEnv().repo, 'decoupe') });
+    assert.ok(errors.some((message) => /preuve de sortie invalide/.test(message)), output);
+    const check = run(['--check'], fixtureEnv({ lots: [lot] }));
+    assert.equal(check.exitCode, 2, output);
+    assert.match(check.stderr, /preuve de sortie invalide/);
+  }
+});
+
+test('validation : action de type inconnu, prompt hors liste, doublon d’identifiant, url non https, not_before invalide', () => {
+  const decoupeDir = join(fixtureEnv().repo, 'decoupe');
+  const check = (action) => validatePlan({ statuses: STATUSES, lots: [lotFixture({ execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [action] } })] }, { decoupeDir });
+  assert.ok(check({ ...ACTION, type: 'magie' }).some((message) => /type inconnu/.test(message)));
+  assert.ok(check({ ...ACTION, before_prompt: 'P7' }).some((message) => /absent des prompts Conductor/.test(message)));
+  assert.ok(check({ ...ACTION, url: 'javascript:alert(1)' }).some((message) => /url non https/.test(message)));
+  assert.ok(check({ ...ACTION, not_before: 'bientôt' }).some((message) => /not_before invalide/.test(message)));
+  assert.ok(check({ ...ACTION, resume_prompt: 'reprendre' }).some((message) => /prompt de reprise invalide/.test(message)));
+  const twice = validatePlan({ statuses: STATUSES, lots: [lotFixture({ execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [ACTION, { ...ACTION, before_prompt: 'P2' }] } })] }, { decoupeDir });
+  assert.ok(twice.some((message) => /dupliquée/.test(message)));
+  assert.deepEqual(check(ACTION), []);
+});
+
+test('validation : un cycle de dépendances est détecté', () => {
+  const lots = [
+    lotFixture({ id: 'T2.1', depends: ['T2.2'], asana_task_id: 'a1', execution: undefined, branch: undefined }),
+    lotFixture({ id: 'T2.2', depends: ['T2.1'], asana_task_id: 'a2', execution: undefined, branch: undefined }),
+  ];
+  const errors = validatePlan({ statuses: STATUSES, lots }, { decoupeDir: join(fixtureEnv().repo, 'decoupe') });
+  assert.ok(errors.some((message) => /cycle de dépendances T2\.1 → T2\.2 → T2\.1/.test(message)), errors.join(' | '));
+});
+
+test('dates : parseNotBefore exige ISO 8601 avec fuseau et une date réelle', () => {
+  assert.equal(parseNotBefore('2026-10-26T08:41:00+01:00').toISOString(), '2026-10-26T07:41:00.000Z');
+  assert.equal(parseNotBefore('2026-10-26T07:41Z').toISOString(), '2026-10-26T07:41:00.000Z');
+  assert.equal(parseNotBefore('2026-10-26T07:41:00.500Z').getUTCMilliseconds(), 500);
+  for (const bad of ['demain', '2026-10-26', '2026-10-26 08:41:00+01:00', '2026-10-26T08:41:00', '2026-02-30T10:00:00+01:00', '2026-13-01T10:00:00Z', '2026-10-26T25:00:00+01:00', '2026-10-26T10:61:00Z', '', null, undefined, 42]) {
+    assert.throws(() => parseNotBefore(bad), /not_before invalide/, String(bad));
+  }
+});
+
+test('dates : un not_before invalide donne une erreur propre (2), jamais une trace ni un crash', () => {
+  const lots = [lotFixture({ status: 'waiting', not_before: 'demain' })];
+  const check = run(['--check'], fixtureEnv({ lots }));
+  assert.equal(check.exitCode, 2);
+  assert.match(check.stderr, /not_before invalide « demain »/);
+  const plainRun = run(['T1.1', 'P1'], fixtureEnv({ lots }));
+  assert.equal(plainRun.exitCode, 2);
+  assert.ok(!/at .*lot\.mjs/.test(plainRun.stderr), 'pas de pile d’appels');
+  const viaConductor = conductor(['T1.1', 'P1'], { lots });
+  assert.equal(viaConductor.exitCode, 2);
+  assert.equal(viaConductor.json.status, 'error');
+  const gate = dateGate(lots[0], NOW);
+  assert.equal(gate.ready, false);
+  assert.match(gate.invalid, /not_before invalide/);
 });
 
 // ═════ Tests couplés au plan réel (remplacés par le commit « tests sur fixtures ») ═════

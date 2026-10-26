@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -18,6 +18,8 @@ export const EVIDENCE_RULE = 'file_exists_nonempty';
 const CONDUCTOR_BRANCH = /^conductor\/[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const LOT_BRANCH = /^lot\/([A-Z]\d\.\d+)-([a-z0-9][a-z0-9._-]*)$/;
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'dev', 'develop', 'prd', 'prod', 'production', 'staging']);
+const ISO_WITH_OFFSET = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+const MAX_EVIDENCE_READ = 1024 * 1024;
 
 export function loadPlan(path = join(REPO, 'docs', 'pilotage', 'plan.json')) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -39,10 +41,32 @@ export function dependenciesReady(states) {
   return states.every((dependency) => dependency.status === 'done');
 }
 
+/** Date ISO 8601 AVEC fuseau (`2026-10-26T08:41:00+01:00`) ou erreur : jamais de date « locale » ambiguë. */
+export function parseNotBefore(value) {
+  const match = typeof value === 'string' ? ISO_WITH_OFFSET.exec(value) : null;
+  if (!match) throw new Error(`not_before invalide « ${String(value)} » : attendu une date ISO 8601 avec fuseau, ex. 2026-10-26T08:41:00+01:00`);
+  const [, year, month, day, hour, minute, second = '0'] = match;
+  const calendar = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  const valid =
+    calendar.getUTCFullYear() === Number(year) &&
+    calendar.getUTCMonth() === Number(month) - 1 &&
+    calendar.getUTCDate() === Number(day) &&
+    Number(hour) <= 23 &&
+    Number(minute) <= 59 &&
+    Number(second) <= 59;
+  const date = new Date(value);
+  if (!valid || Number.isNaN(date.getTime())) throw new Error(`not_before invalide « ${value} » : date ou heure inexistante`);
+  return date;
+}
+
 export function dateGate(lot, now = new Date()) {
   if (!lot.not_before) return { ready: true, date: null };
-  const date = new Date(lot.not_before);
-  return { ready: now >= date, date };
+  try {
+    const date = parseNotBefore(lot.not_before);
+    return { ready: now >= date, date };
+  } catch (error) {
+    return { ready: false, date: null, invalid: error.message };
+  }
 }
 
 export function statusGate(lot, gate) {
@@ -56,6 +80,58 @@ export function statusGate(lot, gate) {
     waiting: 'EN ATTENTE — lever le blocage externe avant exécution.',
   };
   return { ready: false, reason: reasons[lot.status] ?? `STATUT BLOQUANT — ${lot.status}.` };
+}
+
+/**
+ * Un chemin de preuve est un chemin RELATIF du dépôt, en `/`, sans `..`, sans `.` ni segment vide,
+ * sans caractère réservé Windows (`:` ouvre un flux de données alternatif NTFS). Retourne l'erreur ou null.
+ */
+export function validateRelativePath(value) {
+  if (typeof value !== 'string' || value.trim() === '') return 'chemin vide';
+  if (value !== value.trim()) return 'espace en début ou fin de chemin';
+  if (value.includes('\0')) return 'octet nul';
+  if (value.includes('\\')) return 'antislash interdit (utiliser /)';
+  if (value.startsWith('/') || /^[A-Za-z]:/.test(value)) return 'chemin absolu';
+  if (/[:*?"<>|]/.test(value)) return 'caractère réservé';
+  const parts = value.split('/');
+  if (parts.includes('..')) return 'segment « .. » interdit';
+  if (parts.some((part) => part === '' || part === '.')) return 'segment vide ou « . »';
+  return null;
+}
+
+/**
+ * La preuve d'une action humaine : un fichier RÉGULIER, NON VIDE (pas seulement des blancs), dans le dépôt,
+ * dont le chemin réel (liens symboliques résolus) ne sort pas du dépôt.
+ * Ne dit rien de qui l'a écrit ni s'il est commité : cf. `docs/pilotage/CONDUCTOR.md` § preuve.
+ */
+export function inspectEvidence(repoRoot, relativePath) {
+  const invalid = validateRelativePath(relativePath);
+  if (invalid) return { ok: false, reason: `chemin de preuve invalide (${invalid})` };
+  const full = join(repoRoot, relativePath);
+  try {
+    lstatSync(full);
+  } catch {
+    return { ok: false, reason: 'fichier de preuve absent' };
+  }
+  let real;
+  let root;
+  try {
+    real = realpathSync(full);
+    root = realpathSync(repoRoot);
+  } catch {
+    return { ok: false, reason: 'fichier de preuve illisible (lien cassé ?)' };
+  }
+  const path = relative(root, real);
+  if (path === '' || path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path)) {
+    return { ok: false, reason: 'le fichier de preuve sort du dépôt (lien symbolique)' };
+  }
+  const info = statSync(real);
+  if (!info.isFile()) return { ok: false, reason: 'la preuve n’est pas un fichier' };
+  if (info.size === 0) return { ok: false, reason: 'fichier de preuve vide' };
+  if (info.size <= MAX_EVIDENCE_READ && readFileSync(real, 'utf8').trim() === '') {
+    return { ok: false, reason: 'fichier de preuve vide (blancs seulement)' };
+  }
+  return { ok: true, reason: null };
 }
 
 /**
@@ -103,7 +179,9 @@ export function conductorGate(lot, promptId = null, decoupage = null, checkEvide
   }
   const action = (execution.actions ?? []).find((candidate) => candidate.before_prompt === promptId);
   if (action) {
-    const verdict = normalizeEvidenceVerdict(checkEvidence ? checkEvidence(action.output) : Boolean(action.output) && existsSync(join(REPO, action.output)));
+    const verdict = checkEvidence
+      ? normalizeEvidenceVerdict(checkEvidence(action.output))
+      : inspectEvidence(REPO, action.output);
     if (!verdict.ok) {
       return {
         ready: false,
@@ -228,17 +306,50 @@ export function clotureAfterWork(lot, decoupage, branch, done) {
   return onBranch.length > 0 && remainingPrompts(decoupage, branch, done).length === 0;
 }
 
+function findCycle(lots) {
+  const byId = new Map(lots.map((lot) => [lot.id, lot]));
+  const state = new Map();
+  const stack = [];
+  const visit = (id) => {
+    if (state.get(id) === 'done') return null;
+    if (state.get(id) === 'visiting') return [...stack.slice(stack.indexOf(id)), id];
+    state.set(id, 'visiting');
+    stack.push(id);
+    for (const dependency of byId.get(id)?.depends ?? []) {
+      if (!byId.has(dependency) || dependency === id) continue;
+      const cycle = visit(dependency);
+      if (cycle) return cycle;
+    }
+    stack.pop();
+    state.set(id, 'done');
+    return null;
+  };
+  for (const lot of lots) {
+    const cycle = visit(lot.id);
+    if (cycle) return cycle;
+  }
+  return null;
+}
+
 export function validatePlan(plan, options = {}) {
   const decoupeDir = options.decoupeDir ?? join(REPO, 'docs', 'pilotage', 'decoupe');
   const errors = [];
   const ids = new Set();
   const asana = new Set();
+  const actionIds = new Set();
   for (const lot of plan.lots ?? []) {
     if (!LOT_ID.test(lot.id)) errors.push(`${lot.id}: identifiant invalide`);
     if (ids.has(lot.id)) errors.push(`${lot.id}: doublon`);
     ids.add(lot.id);
     if (!plan.statuses?.includes(lot.status)) errors.push(`${lot.id}: statut ${lot.status} inconnu`);
     if (!(lot.done_when?.length > 0)) errors.push(`${lot.id}: done_when vide`);
+    if (lot.not_before !== undefined) {
+      try {
+        parseNotBefore(lot.not_before);
+      } catch (error) {
+        errors.push(`${lot.id}: ${error.message}`);
+      }
+    }
     const conductorMode = ['conductor-agent-lot', 'conductor-assisted'].includes(lot.execution?.mode);
     if (conductorMode) {
       if (!lot.branch) errors.push(`${lot.id}: branche requise pour Conductor`);
@@ -246,13 +357,33 @@ export function validatePlan(plan, options = {}) {
       for (const prompt of lot.execution.prompts ?? []) {
         if (!PROMPT_ID.test(prompt)) errors.push(`${lot.id}: prompt Conductor invalide ${prompt}`);
       }
-      for (const action of lot.execution.actions ?? []) {
-        if (!action.id) errors.push(`${lot.id}: action Conductor sans identifiant`);
-        if (!/^P\d{1,3}$/.test(action.before_prompt ?? '')) errors.push(`${lot.id}: action ${action.id ?? '?'} sans before_prompt valide`);
-        if (!action.type) errors.push(`${lot.id}: action ${action.id ?? '?'} sans type`);
-        if (!action.title) errors.push(`${lot.id}: action ${action.id ?? '?'} sans titre`);
-        if (!action.output) errors.push(`${lot.id}: action ${action.id ?? '?'} sans preuve de sortie`);
-        if (!action.resume_prompt) errors.push(`${lot.id}: action ${action.id ?? '?'} sans prompt de reprise`);
+    }
+    for (const action of lot.execution?.actions ?? []) {
+      const name = action.id ?? '?';
+      if (!action.id) errors.push(`${lot.id}: action Conductor sans identifiant`);
+      else if (actionIds.has(action.id)) errors.push(`${lot.id}: action ${action.id} dupliquée`);
+      else actionIds.add(action.id);
+      if (!PROMPT_ID.test(action.before_prompt ?? '')) errors.push(`${lot.id}: action ${name} sans before_prompt valide`);
+      else if (lot.execution.prompts?.length && !lot.execution.prompts.includes(action.before_prompt)) {
+        errors.push(`${lot.id}: action ${name} avant ${action.before_prompt}, absent des prompts Conductor`);
+      }
+      if (!action.type) errors.push(`${lot.id}: action ${name} sans type`);
+      else if (!HUMAN_ACTION_TYPES.includes(action.type)) errors.push(`${lot.id}: action ${name} de type inconnu ${action.type}`);
+      if (!action.title) errors.push(`${lot.id}: action ${name} sans titre`);
+      if (!action.output) errors.push(`${lot.id}: action ${name} sans preuve de sortie`);
+      else {
+        const invalid = validateRelativePath(action.output);
+        if (invalid) errors.push(`${lot.id}: action ${name} preuve de sortie invalide (${invalid})`);
+      }
+      if (!action.resume_prompt) errors.push(`${lot.id}: action ${name} sans prompt de reprise`);
+      else if (!PROMPT_ID.test(action.resume_prompt)) errors.push(`${lot.id}: action ${name} prompt de reprise invalide ${action.resume_prompt}`);
+      if (action.url && !/^https:\/\//.test(action.url)) errors.push(`${lot.id}: action ${name} url non https`);
+      if (action.not_before !== undefined) {
+        try {
+          parseNotBefore(action.not_before);
+        } catch (error) {
+          errors.push(`${lot.id}: action ${name} ${error.message}`);
+        }
       }
     }
     if (lot.asana_task_id) {
@@ -293,6 +424,8 @@ export function validatePlan(plan, options = {}) {
       }
     }
   }
+  const cycle = findCycle(plan.lots ?? []);
+  if (cycle) errors.push(`${cycle[0]}: cycle de dépendances ${cycle.join(' → ')}`);
   return errors;
 }
 
@@ -380,7 +513,7 @@ function printHumanAction(io, lot, action) {
   log(`Responsable : ${action.owner ?? lot.responsible}`);
   log(`Action : ${action.title}`);
   if (action.url) log(`Ouvrir : ${action.url}`);
-  log(`Preuve attendue : ${action.output}`);
+  log(`Preuve attendue : ${action.output} (fichier non vide, dans le dépôt)`);
   log(`Reprise : /lot ${lot.id} ${action.resume_prompt}`);
   if (action.instructions?.length) {
     log('\nÀ faire');
@@ -448,7 +581,7 @@ export function run(argv = [], env = {}) {
   const decoupeDir = env.decoupeDir ?? join(repo, 'docs', 'pilotage', 'decoupe');
   const now = env.now ?? new Date();
   const git = env.git ?? makeGit(repo);
-  const evidenceOf = env.checkEvidence ?? ((path) => existsSync(join(repo, path)));
+  const evidenceOf = env.checkEvidence ?? ((path) => inspectEvidence(repo, path));
 
   const out = [];
   const err = [];
@@ -521,6 +654,7 @@ export function run(argv = [], env = {}) {
     const done = completedPrompts(lot, g.subjects ?? []);
     const states = dependencyStates(lot, all);
     const gate = dateGate(lot, now);
+    if (gate.invalid) return usage(`[${lot.id}] ${gate.invalid}`);
     let workflow = statusGate(lot, gate);
     const decoupagePath = join(decoupeDir, `${lot.id}.md`);
     const decoupage = existsSync(decoupagePath) ? parseDecoupage(readFileSync(decoupagePath, 'utf8')) : null;
