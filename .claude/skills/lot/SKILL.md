@@ -77,8 +77,8 @@ critère à la fois, un commit chacun, puis clôturer.
 Une fois par branche, après tous ses prompts :
 
 1. lancer `pnpm verify` et les contrôles du périmètre ; pour le site, `pnpm verif:lp-links` ;
-2. lancer en lecture seule `.claude/agents/relecteur-securite.md` et
-   `.claude/agents/relecteur-conformite.md` sur `origin/main...HEAD` ;
+2. lancer en lecture seule les agents `relecteur-securite` et `relecteur-conformite`
+   (`.claude/agents/`), en leur fournissant le diff `git diff origin/main...HEAD` (ils n'ont pas de shell) ;
 3. revérifier chaque constat, corriger les bloquants et majeurs, conserver les mineurs dans la PR ;
 4. pousser seulement si le mandat de la session l'autorise, puis demander l'autorisation avant
    d'ouvrir une PR, sauf mandat explicite déjà donné ;
