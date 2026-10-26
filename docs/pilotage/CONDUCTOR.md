@@ -35,18 +35,28 @@ référence à l'ancien propriétaire n'est à réécrire : les liens d'ancienne
 
 ## Prérequis avant le premier run
 
-Conductor lit `scripts/lot.mjs`, `docs/pilotage/` et le skill `/lot` sur **`origin/main`** (INFÉRÉ de sa
-phase de préparation) ; rien de ce qui n'y est pas fusionné n'existe pour lui. Dans l'ordre :
+Conductor n'exécute **pas** le `scripts/lot.mjs` de la branche de l'agent : le contrat v1.2 § 1 lui fait
+exécuter une **copie de confiance**, extraite de **`origin/main`** (`git show`) et posée hors du worktree de
+l'agent, avec `--racine <worktree de la branche>`. Donc **`scripts/lot.mjs` doit exister sur `main`**, dans la
+version qui connaît `--conductor` et `--racine` ; le plan, les découpages et le skill `/lot` sont lus sur
+`origin/main` pour la préparation (INFÉRÉ de la phase de préparation de Conductor lue le 26/10 ; que le
+code de Conductor fasse bien cette extraction est **à vérifier sur l'instance**). Rien de ce qui n'est pas
+fusionné dans `main` n'existe pour lui. Dans l'ordre :
 
-1. **La PR #139 doit être fusionnée, par squash**, pour ne pas publier l'historique de ses anciens
+1. **La PR #139 doit être fusionnée, par squash, AVANT tout run** : c'est elle qui amène `scripts/lot.mjs`,
+   `docs/pilotage/` et le skill sur `main`, et le squash évite de publier l'historique de ses anciens
    commits (ils portent des noms qui ont été généralisés depuis ; le dépôt est public). Sa fusion est une
    décision humaine séparée (lot C8.2).
-2. **Puis la branche de correctifs, en PR séparée** : le contrat `CONDUCTOR_RESULT`, la branche unique,
-   l'historique `origin/main..HEAD` et le reste de ce document n'existent que sur elle. Après un squash de
+2. **Puis la branche de correctifs, en PR séparée** : le contrat `CONDUCTOR_RESULT`, `--racine`, la branche
+   unique, le détecteur de prompts, l'historique `origin/main..HEAD` et le reste de ce document n'existent que
+   sur elle (le `lot.mjs` de la #139 seule n'émet pas `CONDUCTOR_RESULT`). Après un squash de
    la #139, cette branche (bâtie sur les commits d'origine de la #139, dernier commit `3ee922da`) doit être
    refaite sur la nouvelle `origin/main` avant d'ouvrir sa PR (INFÉRÉ : sans cela, ses commits
    rejouent les changements déjà squashés) ; ce geste est celui du propriétaire, il n'est pas fait ici.
-3. Les autres prérequis (App GitHub, workspace, emploi Agent Lot, essai à blanc de la preuve) sont listés
+3. **`enforce_admins` de `main`** vaut `false` (OBSERVÉ le 26/10) : les administrateurs ne sont pas soumis à la
+   règle de protection. À **trancher par le propriétaire** avant d'ouvrir `main` à un flux automatisé ; ce
+   dépôt n'affirme rien de plus.
+4. Les autres prérequis (App GitHub, workspace, emploi Agent Lot, essai à blanc de la preuve) sont listés
    ci-dessus et restent **à vérifier sur l'instance**.
 
 Tant que 1 et 2 ne sont pas faits, la phase de préparation de Conductor ne trouve pas le contrat et
@@ -80,16 +90,25 @@ seul lot prêt, découpé et décrit pour Agent Lot. Désormais, tout prompt exi
 est candidat ; statut, date, dépendances, branche, ordre des prompts et actions humaines continuent
 de bloquer.
 
-## Contrat `lot.mjs --conductor` ↔ Conductor (v1.1)
+## Contrat `lot.mjs --conductor` ↔ Conductor (v1.2)
 
-Invocation, depuis la racine du **worktree de la branche du lot** pour exécuter un prompt. Lancé depuis un
-worktree de base à HEAD détaché, `--conductor` répond **volontairement** `blocked` (« HEAD détaché »,
-`branch.current = null`) : c'est la porte de branche, qui dit à Conductor qu'il doit fournir ou créer
-`conductor/agent-lot/<ID>`. Ce worktree n'a ni la branche ni les preuves : on n'y exécute jamais un prompt.
+Invocation, avec la racine du **worktree de la branche du lot** pour exécuter un prompt (`--racine`, ou, à la
+main, depuis cette racine). Lancé sur un worktree de base à HEAD détaché, `--conductor` répond
+**volontairement** `blocked` (`branch.current = null`) : c'est la porte de branche, qui dit à Conductor
+qu'il doit fournir ou créer `conductor/agent-lot/<ID>`. Ce worktree n'a ni la branche ni les preuves : on
+n'y exécute jamais un prompt. Conductor reconnaît cette porte à `status = blocked` et `branch.current = null`,
+jamais au texte de `reason`.
 
 ```text
-node scripts/lot.mjs <LOT_ID> <PROMPT_ID> --conductor     # PROMPT_ID = P1 … P999
+node scripts/lot.mjs <LOT_ID> <PROMPT_ID> --conductor                      # depuis la racine du dépôt (à la main)
+node <copie de confiance>/lot.mjs <LOT_ID> <PROMPT_ID> --conductor --racine <racine du worktree>   # Conductor
 ```
+
+`PROMPT_ID` = `P1` … `P999`. Historique des versions du contrat : v1 (ligne finale `CONDUCTOR_RESULT`), v1.1
+(branche unique `conductor/agent-lot/<ID>`, historique sans fenêtre, `reason` sans chemin local, une action par
+prompt), v1.1.1 (`branch.current = null` admis pour `blocked` et `too_early`), v1.2 (`--racine`, détecteur de
+prompts unique, format d'identifiant unique, garantie sur `branch.current`, échéance de la note-tâche,
+reprise de la preuve).
 
 **`--racine <chemin absolu>`** (contrat v1.2 § 1) : la racine du dépôt à lire (plan, découpages, preuves,
 historique git, branche courante) au lieu du dossier parent du script. Conductor exécute ainsi une **copie de
@@ -247,22 +266,35 @@ dans le prompt de reprise (S2.1 P1 le relit face à la baseline) et à la relect
 
 L'agent ne crée jamais la preuve lui-même. La preuve doit se trouver **sur la branche de l'exécution**,
 c'est-à-dire, en mode Conductor, sur `conductor/agent-lot/<ID>` (pour `S2.1` : `conductor/agent-lot/S2.1`).
-Son nom étant connu d'avance et identique de P1 à Pn, une personne peut y déposer la preuve avant même le
-premier run. Hypothèse de travail (**INFÉRÉ, non démontré ; seul Conductor décide comment il rapatrie un
-fichier dans le worktree d'un run**) : la personne responsable dépose le fichier assaini, chiffres et
-libellés seulement, sur la branche distante `conductor/agent-lot/S2.1` (créée depuis `origin/main` si elle
-n'existe pas, un commit au message libre, **jamais** `[S2.1] P1 — …` qui compterait comme prompt fait,
-puis push), ou bien Conductor recopie le fichier fourni par la tâche humaine dans le worktree de cette
-branche. Aucune de ces deux voies n'est confirmée. **INCONNU, à vérifier sur l'instance :**
+Son nom étant connu d'avance et identique de P1 à Pn, la personne responsable peut la déposer avant même le
+premier run.
 
-- si Conductor crée le worktree d'un lot à partir de la branche distante `conductor/agent-lot/<ID>`
-  quand elle existe, ou depuis la base ;
-- si un worktree déjà créé est mis à jour depuis la branche distante avant la reprise (le code de
-  Conductor réutilise un worktree existant d'un prompt à l'autre, INFÉRÉ de sa lecture du 26/10 ; le
-  contrat v1.1 § 7 ne parle que de resynchroniser la branche avec la base) ;
-- si un fichier non suivi déposé dans le worktree survit à la reprise ;
-- si la tâche humaine peut recevoir le fichier ou seulement un lien ;
-- si la configuration de l'emploi autorise un push humain sur le préfixe `conductor/` de ce dépôt.
+**Flux de la preuve S2.1-A1 (contrat v1.2 § 6, décidé le 26/10/2026).**
+
+1. `lot.mjs S2.1 P1` répond `action_required` (`S2.1-A1`) ; Conductor crée la note-tâche et termine le run
+   sans échec ni validation de code.
+2. L'humain (Youness) relève les chiffres et libellés **assainis** (aucun cookie, jeton, adresse e-mail ni
+   identifiant de compte), puis **dépose le fichier sur la branche DISTANTE** `conductor/agent-lot/S2.1` :
+   un seul commit, au message libre qui **ne commence jamais par `[S2.1] P1 — `** (ce sujet compterait comme
+   prompt fait), ne touchant **que** le fichier de preuve (pas `docs/pilotage/**`, pas `scripts/lot.mjs`), puis
+   push. Si la branche distante n'existe pas, elle se crée depuis `origin/main`.
+3. Il **ferme la tâche**. La fermeture relance uniquement `S2.1 P1`, sur la même branche.
+4. Avant la phase 2, Conductor récupère la branche (`fetch`) et **avance sa branche locale du lot en
+   fast-forward uniquement** ; si les historiques ont divergé (commits locaux non poussés d'un côté, commit
+   humain de l'autre), le résultat est `blocked` : aucun merge ni rebase automatique, l'humain tranche. La
+   vérification « branche en retard » (changements de `docs/pilotage/**` et de `scripts/lot.mjs` apparus sur
+   la base depuis le merge-base) reste inchangée.
+5. `lot.mjs` voit alors le fichier dans le worktree et répond `ready`.
+
+Pour `S2.1-A1` le fast-forward est le cas normal : l'action précède P1, la branche locale n'a encore aucun
+commit propre, et le commit humain descend de la base.
+
+**INCONNU, à vérifier sur l'instance** (ce dépôt décrit le contrat, il ne prouve pas l'implémentation de
+Conductor) : que cette reprise (`fetch` puis fast-forward) est livrée et se comporte ainsi ; si Conductor crée
+le worktree d'un lot à partir de la branche distante quand elle existe ou depuis la base ; si un fichier non
+suivi déposé directement dans le worktree survit à la reprise ; si la tâche humaine peut recevoir le fichier ou
+seulement un lien ; si la configuration de l'emploi autorise un push humain sur le préfixe `conductor/` de ce
+dépôt (un essai à blanc le dira).
 
 Tant que ce point n'est pas démontré par un essai à blanc, l'action `S2.1-A1` n'est pas considérée comme
 levée par Conductor : l'humain relance le prompt après avoir vérifié que `lot.mjs` voit le fichier
@@ -320,17 +352,20 @@ Puis :
 1. Conductor fournit un worktree isolé sur la branche du lot (`conductor/agent-lot/<ID>`, ou
    `lot/<ID>-<slug>` en dépôt manuel), la même pour tous les prompts du lot.
 2. `/lot` vérifie statut, date, dépendances, découpage, branche, prompt déjà fait, ordre des prompts et
-   action requise (voir « Contrat »).
+   action requise (voir « Contrat »). Conductor lance la copie de confiance de `scripts/lot.mjs` avec
+   `--racine <worktree>` : le `scripts/lot.mjs` de la branche n'est jamais exécuté.
 3. Le prompt produit son test ciblé et son commit exact (`commit_message`).
 4. Conductor propose le push à la validation humaine ; Agent Lot ne pousse pas.
 5. Le prompt suivant exige que les précédents soient committés dans le worktree de la branche.
-   Contrat v1.1 § 7, côté Conductor : avant d'exécuter un prompt, le worktree de la branche est
-   resynchronisé avec la base (`fetch`, puis vérification que `docs/pilotage/**` et `scripts/lot.mjs` de
-   la branche ne divergent pas de `origin/main`) ; en cas de divergence, `blocked` « branche en retard »,
-   sans rebase automatique. **À VÉRIFIER SUR L'INSTANCE** : S2.1 P3 et S2.2 P4 modifient
-   `docs/pilotage/plan.json` (et `PLAN.md`) sur la branche du lot ; si la vérification compare naïvement
-   la branche à `origin/main`, elle bloquerait ces prompts. Ce que l'implémentation tolère (retard de la
-   branche seulement, ou aussi ses propres commits) n'est pas décidé ici.
+   Contrat v1.1 § 7 et v1.2 § 6, côté Conductor : avant d'exécuter un prompt, la branche du lot est
+   resynchronisée (`fetch`, avance en **fast-forward uniquement** sur la branche distante `conductor/agent-lot/<ID>`
+   si elle a avancé, par exemple pour une preuve déposée par l'humain), puis on vérifie que les changements de
+   `docs/pilotage/**` et de `scripts/lot.mjs` **apparus sur la base** depuis le merge-base ne sont pas ignorés
+   par la branche ; en cas de retard ou de divergence, `blocked` « branche en retard », sans merge ni rebase
+   automatique. Les données de la branche elle-même (S2.1 P3 et S2.2 P4 modifient `docs/pilotage/plan.json` et
+   `PLAN.md`) sont légitimes : la décision du contrat est qu'elles ne bloquent pas. **À VÉRIFIER SUR
+   L'INSTANCE** que l'implémentation de Conductor compare bien « ce qui a changé sur la base » et non la
+   branche entière à `origin/main` (dans ce second cas, S2.1 P3 et S2.2 P4 seraient bloqués à tort).
 6. Après le dernier prompt, une session dédiée, hors Conductor, lance `node scripts/lot.mjs <ID> cloture`.
 
 Le formulaire accepte `P1` à `P999`, pas `cloture`. La clôture lance les contrôles complets, les deux

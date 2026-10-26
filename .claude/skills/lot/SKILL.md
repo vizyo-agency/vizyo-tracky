@@ -19,7 +19,10 @@ Arguments : `$ARGUMENTS`. Sans identifiant, demander lequel.
    `EN ATTENTE`, `MAUVAISE BRANCHE`, `DÉJÀ FAIT`, `ORDRE DES PROMPTS`, `NON COMPATIBLE CONDUCTOR`).
    Dire la dépendance, la date, la branche ou le prompt manquant. Code 4 (`ACTION HUMAINE REQUISE`) :
    suivre le contrat ci-dessous ; ce n'est ni un échec ni une validation de code. En mode `--conductor`,
-   la dernière ligne de stdout est `CONDUCTOR_RESULT <json>` : c'est elle que Conductor lit.
+   la dernière ligne de stdout est `CONDUCTOR_RESULT <json>` : c'est elle que Conductor lit, avec ses
+   champs structurés (`status`, `exit_code`, `branch.current`, `action`), jamais le texte de `reason`.
+   L'autorité de Conductor est sa propre exécution d'une copie de confiance de `scripts/lot.mjs` avec
+   `--racine <worktree>` (`CONDUCTOR.md`) : la relecture faite ici dans le worktree n'en tient pas lieu.
 4. Utiliser un worktree par branche. Ne jamais coder dans le dossier partagé ni sur `main`.
    Dans Conductor, **une seule branche par lot** : `conductor/agent-lot/<ID>` (le lot demandé, exactement),
    la même de P1 à Pn ; en dépôt manuel, `lot/<ID>-<slug>`. Tout autre `conductor/*` est refusé (`MAUVAISE
