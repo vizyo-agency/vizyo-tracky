@@ -110,7 +110,9 @@ branche du lot, la chercher ailleurs donnerait un faux « absent ».
   `resume_command` et `not_before`. Clé d'idempotence côté Conductor : `action.id` + `lot` + `prompt`.
 - **Secrets** : aucune valeur de secret ni donnée de compte ne figure dans `CONDUCTOR_RESULT`.
 - **Compatibilité** : `--depuis <ref>` (passé par les versions de Conductor antérieures au contrat) est
-  accepté et sans effet ; toute autre option inconnue donne `error`.
+  accepté et sans effet, mais sa valeur est obligatoire et ne peut pas commencer par `-` (`--depuis
+  --conductor` n'avale pas `--conductor` : `error`, avec la ligne finale). Toute autre option inconnue
+  (dont `--depuis=<ref>` et les options courtes) et tout argument en trop donnent `error` (2).
 
 ### Clôture d'un lot
 

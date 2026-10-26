@@ -390,6 +390,44 @@ test('compat : --depuis <ref> (Conductor antérieur au contrat) est accepté et 
   assert.equal(json.status, 'ready');
 });
 
+test('arguments : --depuis n’avale jamais l’option suivante, sa valeur est obligatoire', () => {
+  // `--depuis --conductor` : erreur d'usage, ET --conductor est bien lu (la ligne finale est émise).
+  const swallowed = run(['T1.1', 'P1', '--depuis', '--conductor'], fixtureEnv());
+  assert.equal(swallowed.exitCode, 2);
+  const last = swallowed.stdout.trimEnd().split('\n').at(-1);
+  assert.ok(last.startsWith('CONDUCTOR_RESULT '), 'le mode Conductor survit à l’erreur');
+  const json = JSON.parse(last.slice('CONDUCTOR_RESULT '.length));
+  assert.equal(json.status, 'error');
+  assert.ok(json.reason.includes('--depuis attend une référence git'));
+  for (const args of [['T1.1', 'P1', '--depuis'], ['T1.1', 'P1', '--depuis', ''], ['T1.1', 'P1', '--depuis', '-x'], ['T1.1', 'P1', '--depuis', '--rejouer'], ['--depuis', 'T1.1', '--check']]) {
+    for (const mode of [[], ['--conductor']]) {
+      const result = run([...args, ...mode], fixtureEnv());
+      assert.equal(result.exitCode, 2, [...args, ...mode].join(' '));
+      assert.ok(!result.stdout.includes('## Fichiers'), 'rien n’est exécuté');
+    }
+  }
+  assert.equal(run(['T1.1', 'P1', '--depuis', 'origin/main'], fixtureEnv()).exitCode, 0);
+  assert.equal(run(['T1.1', 'P1', '--depuis', 'origin/main', '--rejouer'], fixtureEnv()).exitCode, 0);
+  assert.equal(run(['--depuis', 'origin/main', 'T1.1', 'P1'], fixtureEnv()).exitCode, 0);
+});
+
+test('arguments : option inconnue, forme --depuis=<ref>, option courte et arguments en trop = exit 2 propre', () => {
+  for (const args of [['T1.1', 'P1', '--nimporte'], ['T1.1', 'P1', '--depuis=origin/main'], ['T1.1', 'P1', '-x'], ['T1.1', 'P1', '-'], ['T1.1', 'P1', 'P2'], ['T1.1', 'P1', 'cloture'], ['T1.1', 'P1', 'x', 'y'], ['T1.1', '--check'], ['--check', 'T1.1'], ['--check', '--check']]) {
+    const result = run(args, fixtureEnv());
+    assert.equal(result.exitCode, 2, args.join(' '));
+    assert.ok(result.stderr.length > 0, args.join(' '));
+    assert.ok(!/at .*lot\.mjs/.test(result.stderr), 'pas de pile d’appels');
+    assert.ok(!result.stdout.includes('CONDUCTOR_RESULT'), 'hors --conductor, jamais de ligne finale');
+  }
+  const unknown = run(['T1.1', 'P1', '--conductor', '--nimporte'], fixtureEnv());
+  assert.equal(unknown.exitCode, 2);
+  assert.match(unknown.stderr, /Option inconnue : --nimporte/);
+  const extra = run(['T1.1', 'P1', 'P2', '--conductor'], fixtureEnv());
+  assert.equal(extra.exitCode, 2);
+  assert.match(extra.stderr, /Arguments en trop : P2/);
+  assert.equal(JSON.parse(extra.stdout.trimEnd().split('\n').at(-1).slice('CONDUCTOR_RESULT '.length)).status, 'error');
+});
+
 test('commit_message est fourni dès que le prompt est connu, même bloqué', () => {
   const { json } = conductor(['T1.1', 'P2'], { branch: 'main' });
   assert.equal(json.status, 'blocked');

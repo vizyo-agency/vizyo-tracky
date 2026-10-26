@@ -589,15 +589,23 @@ export function conductorLine(result) {
 }
 
 function parseArgs(argv) {
-  const options = { check: false, conductor: false, replay: false, since: null, positional: [], unknown: [] };
+  const options = { check: false, conductor: false, replay: false, since: null, positional: [], unknown: [], problems: [] };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = String(argv[index]);
     if (argument === '--check' && index === 0) options.check = true;
     else if (argument === '--conductor') options.conductor = true;
     else if (argument === '--rejouer') options.replay = true;
     // Conductor passe encore `--depuis origin/<base>` (versions antérieures au contrat v1) : accepté, sans effet.
-    else if (argument === '--depuis') options.since = String(argv[(index += 1)] ?? '');
-    else if (argument.startsWith('--')) options.unknown.push(argument);
+    // La valeur est OBLIGATOIRE et ne peut pas commencer par « - » : `--depuis --conductor` n'avale jamais l'option suivante
+    // (celle-ci est lue normalement, et `--depuis` seul est une erreur d'usage).
+    else if (argument === '--depuis') {
+      const value = index + 1 < argv.length ? String(argv[index + 1]) : '';
+      if (value === '' || value.startsWith('-')) options.problems.push('--depuis attend une référence git (valeur absente ou commençant par « - »).');
+      else {
+        options.since = value;
+        index += 1;
+      }
+    } else if (argument.startsWith('-')) options.unknown.push(argument);
     else options.positional.push(argument);
   }
   return options;
@@ -643,7 +651,10 @@ export function run(argv = [], env = {}) {
 
   function runChecked() {
     if (options.unknown.length) return usage(`Option inconnue : ${options.unknown.join(', ')}`);
-    if (options.since !== null && !options.since) return usage('--depuis attend une référence git.');
+    if (options.problems.length) return usage(options.problems[0]);
+    if (options.positional.length > (options.check ? 0 : 2)) {
+      return usage(`Arguments en trop : ${options.positional.slice(options.check ? 0 : 2).join(' ')} (usage : node scripts/lot.mjs <ID> [P<n> | cloture] [--conductor] [--rejouer])`);
+    }
 
     let plan;
     try {
