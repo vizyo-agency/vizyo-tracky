@@ -383,14 +383,22 @@ export function validatePlan(plan, options = {}) {
         if (!PROMPT_ID.test(prompt)) errors.push(`${lot.id}: prompt Conductor invalide ${prompt}`);
       }
     }
+    const actionByPrompt = new Map();
     for (const action of lot.execution?.actions ?? []) {
       const name = action.id ?? '?';
       if (!action.id) errors.push(`${lot.id}: action Conductor sans identifiant`);
       else if (actionIds.has(action.id)) errors.push(`${lot.id}: action ${action.id} dupliquée`);
       else actionIds.add(action.id);
       if (!PROMPT_ID.test(action.before_prompt ?? '')) errors.push(`${lot.id}: action ${name} sans before_prompt valide`);
-      else if (lot.execution.prompts?.length && !lot.execution.prompts.includes(action.before_prompt)) {
-        errors.push(`${lot.id}: action ${name} avant ${action.before_prompt}, absent des prompts Conductor`);
+      else {
+        if (lot.execution.prompts?.length && !lot.execution.prompts.includes(action.before_prompt)) {
+          errors.push(`${lot.id}: action ${name} avant ${action.before_prompt}, absent des prompts Conductor`);
+        }
+        // Une seule action est évaluée par prompt (contrat v1.1 § 6) : deux actions avant le même prompt rendraient la seconde invisible.
+        const first = actionByPrompt.get(action.before_prompt);
+        if (first !== undefined) {
+          errors.push(`${lot.id}: actions ${first} et ${name} déclarées avant le même prompt ${action.before_prompt} : une seule action humaine par prompt (fusionner les consignes ou déplacer l'une avant un autre prompt)`);
+        } else actionByPrompt.set(action.before_prompt, name);
       }
       if (!action.type) errors.push(`${lot.id}: action ${name} sans type`);
       else if (!HUMAN_ACTION_TYPES.includes(action.type)) errors.push(`${lot.id}: action ${name} de type inconnu ${action.type}`);

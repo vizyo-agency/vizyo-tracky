@@ -900,6 +900,26 @@ test('validation : action de type inconnu, prompt hors liste, doublon d’identi
   assert.deepEqual(check(ACTION), []);
 });
 
+test('validation : deux actions avant le même prompt sont interdites — --check exit 2 avec un message clair (contrat v1.1 § 6)', () => {
+  const second = { ...ACTION, id: 'T1.1-A2', title: 'Une seconde action', output: 'docs/preuve/autre.md' };
+  const lot = lotFixture({ execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [ACTION, second] } });
+  const check = run(['--check'], fixtureEnv({ lots: [lot] }));
+  assert.equal(check.exitCode, 2);
+  assert.ok(check.stderr.includes('T1.1: actions T1.1-A1 et T1.1-A2 déclarées avant le même prompt P1 : une seule action humaine par prompt'), check.stderr);
+  // Le plan invalide ferme aussi le lanceur de prompt (rien ne part avec une action ignorée).
+  const prompt = conductor(['T1.1', 'P1'], { lots: [lot], branch: 'conductor/agent-lot/T1.1' });
+  assert.equal(prompt.exitCode, 2);
+  assert.equal(prompt.json.status, 'error');
+  assert.ok(prompt.json.reason.includes('une seule action humaine par prompt'), prompt.json.reason);
+  // Deux actions devant deux prompts différents, ou une seule par prompt, restent valides.
+  const apart = lotFixture({ execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [ACTION, { ...second, before_prompt: 'P2', resume_prompt: 'P2' }] } });
+  assert.equal(run(['--check'], fixtureEnv({ lots: [apart] })).exitCode, 0);
+  // Même before_prompt dans deux lots différents : sans objet.
+  const other = lotFixture({ id: 'T2.1', asana_task_id: 'a2', branch: 'lot/T2.1-autre', execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [{ ...ACTION, id: 'T2.1-A1' }] } });
+  const decoupes = { 'T1.1': decoupageText(), 'T2.1': decoupageText({ lotId: 'T2.1', branch: 'lot/T2.1-autre' }) };
+  assert.equal(run(['--check'], fixtureEnv({ lots: [lotFixture({ execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [ACTION] } }), other], decoupes })).exitCode, 0);
+});
+
 test('validation : un cycle de dépendances est détecté', () => {
   const lots = [
     lotFixture({ id: 'T2.1', depends: ['T2.2'], asana_task_id: 'a1', execution: undefined, branch: undefined }),

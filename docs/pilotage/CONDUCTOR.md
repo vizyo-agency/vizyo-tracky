@@ -108,6 +108,8 @@ branche du lot, la chercher ailleurs donnerait un faux « absent ».
   (`authenticated-browser`, `secret`, `decision`, `external-submit`, `deployment`), `responsible`, `url`,
   `instructions`, `forbidden`, `evidence_path`, `evidence_rule` (`file_exists_nonempty`),
   `resume_command` et `not_before`. Clé d'idempotence côté Conductor : `action.id` + `lot` + `prompt`.
+  Une seule action humaine par `before_prompt` et par lot : `--check` refuse un plan qui en déclare deux
+  avant le même prompt (exit 2).
 - **Secrets** : aucune valeur de secret ni donnée de compte ne figure dans `CONDUCTOR_RESULT`. `reason` ne
   contient jamais de chemin absolu local : chemins relatifs au dépôt seulement (un chemin absolu d'un
   message d'erreur est remplacé par `<chemin local>`).
