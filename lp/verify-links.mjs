@@ -84,6 +84,39 @@ for (const city of generatedCities) {
   assert((depth.get(page) ?? Infinity) <= 2, `${page} doit être accessible à profondeur maximale 2.`);
 }
 
+// FAQPage JSON-LD ↔ FAQ visible : même texte, question pour question (lot S2.2 P2 — Tarifs, source
+// unique dans pricing.mjs `faqTarifs`). Limité à tarifs.html : les FAQ villes ont leur propre lien
+// « Voir le simulateur » non repris dans leur JSON-LD, hors périmètre de ce prompt.
+function faqPageLd(html) {
+  for (const m of html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)) {
+    let data;
+    try { data = JSON.parse(m[1]); } catch { continue; }
+    if (data['@type'] === 'FAQPage') return data;
+  }
+  return null;
+}
+function visibleFaqItems(html) {
+  const section = html.match(/<!-- FAQ -->([\s\S]*?)<\/section>/);
+  if (!section) return null;
+  return [...section[1].matchAll(/<summary[^>]*>([\s\S]*?)<svg[\s\S]*?<\/svg><\/summary><p[^>]*>([\s\S]*?)<\/p>/g)]
+    .map((m) => ({ q: textContent(m[1]), a: textContent(m[2]) }));
+}
+let faqPagesChecked = 0;
+for (const file of ['tarifs.html']) {
+  const html = readFileSync(join(publicDir, file), 'utf8');
+  const ld = faqPageLd(html);
+  if (!ld) continue;
+  const visible = visibleFaqItems(html);
+  assert(visible, `${file} porte un FAQPage JSON-LD sans section FAQ visible repérable.`);
+  const ldItems = ld.mainEntity.map((x) => ({ q: textContent(x.name), a: textContent(x.acceptedAnswer.text) }));
+  assert(ldItems.length === visible.length, `${file} : le FAQPage JSON-LD (${ldItems.length} question(s)) et la FAQ visible (${visible.length}) n'ont pas le même nombre de questions.`);
+  for (let i = 0; i < ldItems.length; i++) {
+    assert(ldItems[i].q === visible[i].q, `${file} : la question #${i + 1} du FAQPage ("${ldItems[i].q}") n'existe pas au même texte dans la FAQ visible.`);
+    assert(ldItems[i].a === visible[i].a, `${file} : la réponse #${i + 1} du FAQPage diffère du texte visible pour "${ldItems[i].q}".`);
+  }
+  faqPagesChecked++;
+}
+
 const sitemap = readFileSync(join(publicDir, 'sitemap.xml'), 'utf8');
 const indexedPages = [...sitemap.matchAll(/<loc>(.*?)<\/loc>/g)].map((match) => {
   const pathname = new URL(match[1]).pathname.replace(/^\//, '');
@@ -96,3 +129,4 @@ console.log(`✓ ${generatedCities.length} pages villes reliées depuis Occitani
 console.log('✓ Occitanie à profondeur 1 ; Toulouse et les autres villes à profondeur 2 maximum');
 console.log(`✓ ${indexedPages.length} pages indexables accessibles depuis la Home, sans orpheline`);
 console.log('✓ Liens internes HTML valides et ancres du cluster local visibles');
+console.log(`✓ FAQPage JSON-LD aligné texte pour texte avec la FAQ visible sur ${faqPagesChecked} page(s)`);

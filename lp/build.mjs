@@ -37,6 +37,9 @@ if (process.argv.includes('--sync-pricing')) {
   }
 }
 const P = activePricing.plans, A = activePricing.addons;
+// FAQ Tarifs : une seule source (pricing.mjs `faqTarifs`) pour le visible ET le JSON-LD (lot S2.2 P2).
+// La grille distante (--sync-pricing) ne porte pas ce champ → repli sur pricing.mjs local.
+const FAQ_TARIFS = activePricing.faqTarifs || pricing.faqTarifs;
 
 // Cache-busting de vt.js (hash de contenu)
 const VT_V = createHash('md5').update(readFileSync(pub('assets/vt.js'))).digest('hex').slice(0, 8);
@@ -216,6 +219,18 @@ ${resCard('Soit par mois', 'totalMonth', { t: 'équivalent mensuel' })}
 </div>
 </section>`;
 
+// FAQ Tarifs visible : généré depuis FAQ_TARIFS (lot S2.2 P2) — même texte que le FAQPage JSON-LD.
+const faqItem = ({ q, a }) => `<details style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:4px 22px"><summary style="display:flex;align-items:center;justify-content:space-between;gap:16px;cursor:pointer;padding:18px 0;font-weight:700;font-size:1.02rem;list-style:none">${esc(q)}<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--tx3)" stroke-width="2.2" style="flex:none"><path d="M12 5v14M5 12h14"/></svg></summary><p style="margin:0 0 18px;color:var(--tx2);font-size:.96rem;line-height:1.6">${esc(a)}</p></details>`;
+const FAQ_TARIFS_SECTION = `<!-- FAQ -->
+<section class="vt-sec" style="padding:96px 0">
+<div style="max-width:760px;margin:0 auto;padding:0 32px">
+<div data-reveal style="text-align:center;margin-bottom:44px"><p style="font-family:'JetBrains Mono',monospace;font-size:.74rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600;margin:0 0 14px">FAQ</p><h2 style="font-size:clamp(1.8rem,3.4vw,2.5rem);font-weight:800;letter-spacing:-.025em;line-height:1.1;margin:0">Questions sur les tarifs.</h2></div>
+<div data-reveal style="display:flex;flex-direction:column;gap:12px">
+${FAQ_TARIFS.map(faqItem).join('\n')}
+</div>
+</div>
+</section>`;
+
 // ── Transformation d'une page design → contenu statique ──
 function transform(html, out) {
   const helmetM = html.match(/<helmet>([\s\S]*?)<\/helmet>/);
@@ -230,7 +245,11 @@ function transform(html, out) {
     .replace(/style="display:\{\{ menuDisplay \}\};/g, 'id="vt-menu" style="display:none;')
     .replace(/ style-hover="([^"]*)"/g, ' data-vth="$1"');
   // Page tarifs : remplace la section simulateur (bindings React) par le devis signable autonome
-  if (out === 'tarifs.html') body = body.replace(/<section[^>]*id="simulateur"[\s\S]*?<\/section>/, SIM_SECTION);
+  if (out === 'tarifs.html') {
+    body = body.replace(/<section[^>]*id="simulateur"[\s\S]*?<\/section>/, SIM_SECTION);
+    // FAQ visible générée depuis la même source que le FAQPage JSON-LD (lot S2.2 P2).
+    body = body.replace(/<!-- FAQ -->[\s\S]*?<\/section>/, FAQ_TARIFS_SECTION);
+  }
   // Page accueil : remplace la section #demo (2 boutons morts) par le VRAI formulaire lead.
   if (out === 'index.html') body = body.replace(/<section[^>]*id="demo"[\s\S]*?<\/section>/, DEMO_SECTION);
   // Hub Occitanie : les destinations locales suivent automatiquement cities.mjs.
@@ -302,7 +321,7 @@ ${body}
 const PAGES = [
   { out: 'index.html', title: 'Traceur GPS pour flotte en Occitanie | Vizyo Tracky', description: "Suivez vos véhicules en temps réel, coupez le moteur à distance, recevez des alertes. Boîtier GPS et application française, installation sur site par nos techniciens en Occitanie.", jsonld: [ORG_LD, WEBSITE_LD] },
   { out: 'fonctionnalites.html', title: 'Fonctionnalités du traceur GPS de flotte | Vizyo Tracky', description: "Suivi temps réel, historique des trajets, coupure moteur par plage horaire, alertes, rapports, conducteurs identifiés et mode vie privée CNIL : toutes les fonctionnalités de Vizyo Tracky.", jsonld: [productLd('fonctionnalites.html'), crumb([HOME, { name: 'Fonctionnalités', out: 'fonctionnalites.html' }])] },
-  { out: 'tarifs.html', title: `Tarifs GPS flotte tout inclus — dès ${P.lite.serenite} €/véhicule/an | Vizyo Tracky`, description: `Modèle tout inclus : boîtier, SIM, pose et garantie compris. Tracky Lite ${P.lite.serenite} €, Pro ${P.pro.serenite} €, Signature ${P.signature.serenite} €/véhicule/an HT (Sérénité, 36 mois). Sans engagement dès ${P.lite.liberte} €/an. Devis en ligne.`, jsonld: [productLd('tarifs.html'), crumb([HOME, { name: 'Tarifs', out: 'tarifs.html' }]), faqLd([{ q: 'Quels sont les tarifs de Vizyo Tracky ?', a: `Formule Sérénité (tout inclus, engagement 36 mois) : Tracky Lite ${P.lite.serenite} €, Pro ${P.pro.serenite} €, Signature ${P.signature.serenite} € par véhicule et par an HT — boîtier, SIM, pose et garantie compris. Formule Liberté (sans engagement, 12 mois, matériel restitué) : ${P.lite.liberte}, ${P.pro.liberte} et ${P.signature.liberte} €/an.` }, { q: 'Que veut dire « tout inclus » ?', a: `Le boîtier, la SIM et les données, la pose par nos équipes et la garantie échange sont compris dans l'abonnement. Rien à acheter, rien à installer vous-même.` }, { q: 'Le temps réel est-il inclus ?', a: `Le suivi standard est inclus. Le Live temps réel (20 s) est une option à ${A.live.perVehYear} €/véhicule/an, incluse dans Tracky Signature.` }, { q: 'Le tarif peut-il augmenter ?', a: "Non : le tarif est garanti à la souscription et reconduit au même prix. Pas d'augmentation surprise." }])] },
+  { out: 'tarifs.html', title: `Tarifs GPS flotte tout inclus — dès ${P.lite.serenite} €/véhicule/an | Vizyo Tracky`, description: `Modèle tout inclus : boîtier, SIM, pose et garantie compris. Tracky Lite ${P.lite.serenite} €, Pro ${P.pro.serenite} €, Signature ${P.signature.serenite} €/véhicule/an HT (Sérénité, 36 mois). Sans engagement dès ${P.lite.liberte} €/an. Devis en ligne.`, jsonld: [productLd('tarifs.html'), crumb([HOME, { name: 'Tarifs', out: 'tarifs.html' }]), faqLd(FAQ_TARIFS)] },
   { out: 'secteur-public.html', title: 'GPS véhicules de service — secteur public & médico-social | Vizyo Tracky', description: "Géolocalisation des véhicules de service pour établissements publics, foyers, structures médico-sociales et collectivités : conformité CNIL, conducteurs identifiés, données souveraines, marchés publics.", jsonld: [crumb([HOME, { name: 'Secteur public', out: 'secteur-public.html' }])] },
   { out: 'securite.html', title: 'Sécurité & conformité RGPD — hébergement France | Vizyo Tracky', description: "Vos données restent en France, sous votre contrôle : hébergement souverain, chiffrement TLS 1.3, conformité RGPD by design, mode vie privée CNIL.", jsonld: [crumb([HOME, { name: 'Sécurité', out: 'securite.html' }])] },
   { out: 'partenariat-maestroo.html', title: 'Vizyo Tracky × Maestroo — le GPS de flotte dans votre gestion de transport', description: "Vizyo Tracky en partenariat avec Maestroo : GPS temps réel, coupe-circuit moteur, analyse IA des trajets et pilotage des économies, bientôt intégrés à votre logiciel de gestion de transport. Découvrez la présentation animée.", jsonld: [crumb([HOME, { name: 'Partenariat Maestroo', out: 'partenariat-maestroo.html' }])] },
