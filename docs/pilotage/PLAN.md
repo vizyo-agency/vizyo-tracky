@@ -56,9 +56,10 @@ ajouter la passerelle Action humaine · `C8.5` cartographier les secrets sans le
 restent séparés : accès GitHub, livraison, configuration, interaction humaine et secrets ne partagent
 pas la même autorisation.
 
-État constaté le 26/10/2026 : le dépôt est transféré à `vizyo-agency/vizyo-tracky` et `main` est protégée
-(une approbation requise, aucun contrôle requis). L'accès de l'App GitHub à ce dépôt et l'état du workspace
-sont **à vérifier sur l'instance Conductor**. Voir [`CONDUCTOR.md`](CONDUCTOR.md).
+État constaté le 26/10/2026 (soir) : le dépôt est transféré à `vizyo-agency/vizyo-tracky`, `main` est protégée
+(une approbation requise, aucun contrôle requis), le pilotage `/lot` est fusionné (PR n° 139 à 141), Agent Lot est
+embauché et configuré en profil pilote sur l'instance dev, et V5.2 a été exécuté de bout en bout (PR n° 142).
+Seul C8.5 reste à faire (inventaire des secrets, sans valeurs). Voir [`CONDUCTOR.md`](CONDUCTOR.md).
 
 ### P6 — produit TRACKY
 

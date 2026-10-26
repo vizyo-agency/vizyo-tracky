@@ -6,7 +6,7 @@
 Étiquettes : **OBSERVÉ** (constaté, avec sa date), **INFÉRÉ** (déduit), **À VÉRIFIER SUR L'INSTANCE**
 (seule l'instance Conductor le sait ; ce dépôt ne peut ni le prouver ni l'affirmer).
 
-## État au 26/10/2026
+## État au 26/10/2026 (mis à jour le soir, après le premier lot exécuté)
 
 - Dépôt : `vizyo-agency/vizyo-tracky`, public, branche de base `main`. Le dépôt a été transféré depuis
   un compte personnel ; l'ancienne adresse redirige. OBSERVÉ le 26/10.
@@ -15,13 +15,23 @@
   OBSERVÉ le 26/10 par lecture de la protection. Ce dernier réglage est **à trancher par le propriétaire** ;
   ce dépôt n'affirme rien de plus. Le dépôt n'avait aucun workflow au 25/10 ; la CI minimale du pilotage
   est décrite dans `.github/workflows/pilotage.yml` (non exigée). OBSERVÉ le 26/10.
-- Branche de pilotage : `chore/tracky-lot-pilotage` ; PR de pilotage : n° 139. Sa fusion est une décision
-  humaine séparée (lot C8.2).
+- Pilotage `/lot` sur `main` : la PR n° 139 (squash), puis les correctifs (n° 140) et le découpage de V5.2
+  (n° 141) sont **fusionnés**. OBSERVÉ le 26/10 (fusions faites par le propriétaire du dépôt avec contournement
+  administrateur, la protection exigeant une approbation que l'auteur ne peut pas se donner).
 - Projet Conductor `tracky`, agent `agent-lot`, fuseau Europe/Paris, pile Angular · Node.js ·
   PostgreSQL · Docker.
-- **À vérifier sur l'instance** : que l'App GitHub « Vizyo Conductor » est installée sur ce dépôt, l'état
-  du workspace du projet (clone possible, protection de `main` lisible), l'équipe embauchée et ses
-  plannings, la configuration réelle de l'emploi Agent Lot (grade, modèle, essai, parallélisme).
+- **Observé sur l'instance dev le 26/10** : l'App GitHub accède à ce dépôt (clone du workspace, push d'une
+  branche `conductor/agent-lot/V5.2`), le workspace est prêt, Agent Lot est embauché (Sonnet 5, essai de 10
+  exécutions, parallélisme 1, déclencheur manuel, concurrence appliquée au niveau du projet) et configuré en
+  **profil pilote documentaire** : écriture limitée à `docs/marketing/seo/veille/**`, seule commande
+  `node scripts/lot.mjs *`, environnement filtré, diff et scan de secrets avant push, 2 $ au plus par run.
+  Le projet est en simulation forcée côté instance dev ; une **approbation humaine d'un push, elle, pousse
+  pour de bon** (la simulation ne couvre que les autorisations automatiques).
+- **Premier lot exécuté de bout en bout : V5.2** (3 prompts, 3 commits, 0,77 $ en 4 runs dont un raté, PR n° 142
+  fusionnée, clôture n° 143). OBSERVÉ le 26/10. Le run raté a révélé qu'un sujet de commit portant une
+  apostrophe ou un accent grave était refusé par la garde ; corrigé côté Conductor (PR n° 434 et n° 436) et
+  vérifié contre les vrais sujets de Nisiv.
+- Seule l'instance **dev** a été exercée ; Nisiv reste en dev.
 - Coffre Tracky : aucun secret propre au projet n'est documenté ici ; les secrets de plateforme restent
   hérités.
 
@@ -34,6 +44,10 @@ s'installe que sur l'organisation ; le transfert vers l'organisation a depuis é
 référence à l'ancien propriétaire n'est à réécrire : les liens d'anciennes PR sont redirigés.
 
 ## Prérequis avant le premier run
+
+> **Situation au 26/10 (soir) : les points 1 à 3 sont franchis** (#139, #140 fusionnées ; `enforce_admins`
+> reste `false`, décision du propriétaire : « tant que les fusions fonctionnent »), et le point 4 a été
+> constaté sur l'instance dev (voir l'état ci-dessus). Le texte qui suit garde le raisonnement d'origine.
 
 Conductor n'exécute **pas** le `scripts/lot.mjs` de la branche de l'agent : le contrat v1.2 § 1 lui fait
 exécuter une **copie de confiance**, extraite de **`origin/main`** (`git show`) et posée hors du worktree de
@@ -296,7 +310,9 @@ suivi déposé directement dans le worktree survit à la reprise ; si la tâche 
 seulement un lien ; si la configuration de l'emploi autorise un push humain sur le préfixe `conductor/` de ce
 dépôt (un essai à blanc le dira).
 
-Tant que ce point n'est pas démontré par un essai à blanc, l'action `S2.1-A1` n'est pas considérée comme
+**Statut au 26/10** : la passerelle Action humaine est livrée côté Conductor (PR n° 433 : le run passe à
+« ignoré » et une tâche de note `[S2.1-A1]` idempotente est créée) mais **n'a pas été exercée en réel** : S2.1 a
+été clos à la main. Tant que ce point n'est pas démontré par un essai à blanc, l'action `S2.1-A1` n'est pas considérée comme
 levée par Conductor : l'humain relance le prompt après avoir vérifié que `lot.mjs` voit le fichier
 (`node scripts/lot.mjs S2.1 P1 --conductor` dans le worktree de la branche `conductor/agent-lot/S2.1`).
 
@@ -316,8 +332,9 @@ propriétaire :
 - **Avant d'approuver un push**, relire le diff (`git diff origin/main...<branche>` dans le worktree) :
   l'écran de validation de Conductor n'est pas supposé montrer le diff complet.
 - Contrat v1.1 § 8, côté Conductor : scan des lignes ajoutées avant tout push (fermé en cas d'erreur),
-  diff et résultat du scan visibles dans la validation avant approbation. **INCONNU : à vérifier sur
-  l'instance** que c'est livré ; ce dépôt ne peut pas l'affirmer.
+  diff et résultat du scan visibles dans la validation avant approbation. **OBSERVÉ le 26/10 sur l'instance
+  dev** : la carte de validation montre la plage lue, les fichiers modifiés, le `diff --stat`, le résultat du
+  scan (« aucune découverte ») et un extrait du diff.
 - `enforce_admins` de `main` vaut actuellement `false` (OBSERVÉ le 26/10) : à trancher par le propriétaire.
   Rien de plus n'est affirmé ici sur ses conséquences.
 
@@ -336,9 +353,10 @@ journalise lectures d'agents et révélations humaines. Règles Tracky :
 
 ## Lancer un prompt
 
-Avant le premier run : les prérequis ci-dessus (PR #139 fusionnée par squash, puis les correctifs en PR
-séparée, lot C8.2), accès GitHub vérifié sur l'instance, workspace prêt, Agent Lot embauché avec la
-configuration cible et lot réellement prêt.
+Prérequis (remplis sur l'instance dev au 26/10) : pilotage fusionné sur `main`, accès GitHub vérifié,
+workspace prêt, Agent Lot embauché et configuré, lot réellement prêt. Le premier lot confié est V5.2 ; les
+lots suivants dépendent du profil de l'emploi (voir « État » : le profil pilote n'écrit que dans
+`docs/marketing/seo/veille/**`, il faut l'élargir à dessein pour un autre lot).
 
 Depuis la fiche de l'emploi :
 
