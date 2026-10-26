@@ -2138,8 +2138,11 @@ test('m15 : le plan réel — chaque not_before (lot et action) est ISO avec le 
 });
 
 test('m15 : action.not_before — ISO avec décalage de Paris, canonique, valeur du lot en repli ; le jour de Paris se lit sur les 10 premiers caractères', () => {
-  // Le vrai plan : S2.1-A1, verrou du lundi 26/10/2026 à 08:41 Paris (heure d'hiver).
-  const real = run(['S2.1', 'P1', '--conductor'], { git: { branch: () => 'conductor/agent-lot/S2.1', subjects: () => [] }, now: new Date('2026-10-26T08:00:00Z') });
+  // La vraie action S2.1-A1 (verrou du lundi 26/10/2026 à 08:41 Paris, heure d'hiver), jouée sur une copie du lot
+  // remise à l'état « waiting » : le plan réel a avancé (S2.1 est clos), le test ne doit pas dépendre de son état.
+  const realLot = { ...loadPlan().lots.find((lot) => lot.id === 'S2.1'), status: 'waiting' };
+  const realDecoupage = readFileSync(new URL('../docs/pilotage/decoupe/S2.1.md', import.meta.url), 'utf8');
+  const real = run(['S2.1', 'P1', '--conductor'], fixtureEnv({ lots: [realLot], decoupes: { 'S2.1': realDecoupage }, branch: 'conductor/agent-lot/S2.1', now: new Date('2026-10-26T08:00:00Z') }));
   const line = real.stdout.trimEnd().split('\n').at(-1);
   const json = JSON.parse(line.slice('CONDUCTOR_RESULT '.length));
   assert.equal(json.status, 'action_required', json.reason);
