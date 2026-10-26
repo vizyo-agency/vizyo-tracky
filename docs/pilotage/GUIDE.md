@@ -43,25 +43,42 @@ signal extérieur. `decision` exige une réponse de Youness avant tout code.
 les gestes, le test, le critère et le message de commit. `cloture` refuse de se déclarer prête si un
 prompt de la branche n'a pas de commit.
 
+Un prompt `Pn` exige que les prompts qui le précèdent dans le découpage (même branche) soient déjà
+committés (`[<ID>] Pk — …`) ; un prompt déjà committé est refusé (`--rejouer` le reprend
+volontairement, hors Conductor seulement). `cloture` reste possible après le dernier prompt, même si ce
+prompt a passé le lot à `done` dans le plan, tant que les commits de la branche le prouvent.
+
 Dans Conductor, un prompt découpé est compatible par défaut avec Agent Lot. Si une étape dépend d'un
 navigateur connecté, d'un secret non disponible, d'une décision, d'une communication ou d'un
 déploiement, le lanceur retourne `ACTION HUMAINE REQUISE` avec une preuve attendue et un prompt de
-reprise. Cette action vit dans Notes/Tâches ; elle ne doit pas être maquillée en validation Git.
+reprise. Cette action vit dans Notes/Tâches ; elle ne doit pas être maquillée en validation Git. Le
+contrat exact (ligne `CONDUCTOR_RESULT`, codes de sortie, branches) est dans
+[`CONDUCTOR.md`](CONDUCTOR.md).
 
 Un prompt :
 
 1. lit seulement les sources citées ;
 2. réalise seulement les gestes demandés ;
 3. lance le test ciblé et le lint des fichiers touchés quand il s'agit de code ;
-4. committe avec le message exact affiché, puis pousse ;
+4. committe avec le message exact affiché (`git add` par chemins explicites, jamais `-A`) ;
 5. rend compte en trois lignes et s'arrête.
 
-La clôture, une fois par branche :
+### Qui pousse, qui ouvre la PR
+
+- **Dans Conductor (Agent Lot)** : l'agent ne pousse jamais et n'ouvre jamais de PR. Il rend son commit ;
+  Conductor propose le push dans Validations et un humain le décide. La PR, la fusion et le déploiement
+  sont des gestes séparés, chacun avec sa propre décision.
+- **Hors Conductor (session locale)** : on ne pousse que si le mandat de la session l'autorise, sur la
+  branche du lot, jamais sur `main`. La PR suit la clôture et demande l'autorisation avant d'être
+  ouverte, sauf mandat explicite déjà donné.
+
+La clôture, une fois par branche, dans une session dédiée hors Conductor :
 
 1. lance `pnpm verify` et les contrôles propres au périmètre (`pnpm verif:lp-links` pour le site) ;
 2. lance une relecture sécurité et une relecture conformité en lecture seule ;
 3. revérifie chaque constat, corrige les bloquants et majeurs ;
-4. ouvre la PR vers `main`, attend sa CI et ne fusionne jamais sa propre PR ;
+4. prépare la PR vers `main` (ouverture soumise à l'autorisation, voir ci-dessus), attend les
+   contrôles de la PR et ne fusionne jamais sa propre PR ;
 5. met à jour le plan et la carte Asana avec des preuves, pas avec « fait ».
 
 ## 4. Git et worktrees

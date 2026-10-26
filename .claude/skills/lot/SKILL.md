@@ -10,12 +10,16 @@ Arguments : `$ARGUMENTS`. Sans identifiant, demander lequel.
 ## Avant toute action
 
 1. Lire `CLAUDE.md`, puis `docs/pilotage/GUIDE.md`.
-2. Si le brief mentionne Vizyo Conductor ou Agent Lot, lire `docs/pilotage/CONDUCTOR.md`, puis
-   exécuter `git fetch origin` et `node scripts/lot.mjs $ARGUMENTS --conductor`.
-   Sinon, exécuter `git fetch origin`, puis `node scripts/lot.mjs $ARGUMENTS`.
-3. Si la sortie dit `PAS PRÊT`, `TROP TÔT` ou que la branche courante ne correspond pas, s'arrêter.
-   Dire la dépendance, la date ou le worktree attendu. Si elle dit `ACTION HUMAINE REQUISE`, suivre
-   le contrat ci-dessous : ce n'est ni un échec ni une validation de code.
+2. Si le brief mentionne Vizyo Conductor ou Agent Lot, **ou si la branche courante commence par
+   `conductor/`**, lire `docs/pilotage/CONDUCTOR.md`, puis exécuter `git fetch origin` et
+   `node scripts/lot.mjs $ARGUMENTS --conductor`. Sinon, exécuter `git fetch origin`, puis
+   `node scripts/lot.mjs $ARGUMENTS`.
+3. **Tout code de sortie non nul arrête le travail**, sauf 4. Code 2 : erreur d'usage ou de plan ; code 3 :
+   non prêt (`PAS PRÊT`, `TROP TÔT`, `TERMINÉ`, `PARTIEL`, `BACKLOG`, `DÉCISION REQUISE`,
+   `EN ATTENTE`, `MAUVAISE BRANCHE`, `DÉJÀ FAIT`, `ORDRE DES PROMPTS`, `NON COMPATIBLE CONDUCTOR`).
+   Dire la dépendance, la date, la branche ou le prompt manquant. Code 4 (`ACTION HUMAINE REQUISE`) :
+   suivre le contrat ci-dessous ; ce n'est ni un échec ni une validation de code. En mode `--conductor`,
+   la dernière ligne de stdout est `CONDUCTOR_RESULT <json>` : c'est elle que Conductor lit.
 4. Utiliser un worktree par branche. Ne jamais coder dans le dossier partagé ni sur `main`.
    Dans un worktree isolé fourni par Conductor, reprendre la branche distante indiquée ou la créer
    depuis `origin/main`, puis relancer le script. Ne pas créer un worktree imbriqué.
@@ -28,7 +32,8 @@ Faire seulement ce prompt :
 - lire les sources citées et les fichiers concernés ;
 - réaliser les gestes indiqués ;
 - lancer le test ciblé et le lint des fichiers touchés si applicable ;
-- committer avec le message exact affiché ;
+- committer avec le message exact affiché, en ajoutant les fichiers du prompt par chemins explicites
+  (`git add <chemins>`, jamais `-A` ni `.`) : le dépôt est partagé ;
 - hors Conductor, pousser seulement si le mandat courant l'autorise ; dans Conductor, ne jamais
   pousser : rendre le commit et laisser la plateforme proposer l'action à la validation humaine ;
 - rendre compte : changement, test, prompt suivant ; puis s'arrêter.
@@ -57,8 +62,9 @@ Dans Conductor :
 Si la version courante de Conductor ne sait pas encore créer cette tâche automatiquement, rendre le bloc
 `ACTION HUMAINE REQUISE` tel quel et s'arrêter. Ne pas contourner avec une fausse validation.
 
-S'arrêter si un fait métier manque, si le prompt déborde nettement de 30 minutes ou si un prompt
-antérieur de la même branche n'a pas de commit. Formuler la décision manquante avec options et recommandation.
+S'arrêter si un fait métier manque ou si le prompt déborde nettement de 30 minutes. L'ordre des prompts
+est imposé par le script (un prompt antérieur sans commit donne `ORDRE DES PROMPTS`, un prompt déjà
+committé `DÉJÀ FAIT`). Formuler la décision manquante avec options et recommandation.
 
 ## `/lot <ID>` sans découpage
 
@@ -74,12 +80,15 @@ Une fois par branche, après tous ses prompts :
 2. lancer en lecture seule `.claude/agents/relecteur-securite.md` et
    `.claude/agents/relecteur-conformite.md` sur `origin/main...HEAD` ;
 3. revérifier chaque constat, corriger les bloquants et majeurs, conserver les mineurs dans la PR ;
-4. pousser puis demander l'autorisation avant d'ouvrir une PR, sauf mandat explicite déjà donné ;
-5. attendre tous les jobs de CI ; ne jamais fusionner sa propre PR ni déployer sans autorisation ;
+4. pousser seulement si le mandat de la session l'autorise, puis demander l'autorisation avant
+   d'ouvrir une PR, sauf mandat explicite déjà donné ;
+5. attendre les contrôles de la PR (la CI du pilotage, si elle existe) ; ne jamais fusionner sa propre
+   PR ni déployer sans autorisation ;
 6. mettre à jour le plan et Asana avec les preuves vérifiables.
 
 Le formulaire Agent Lot accepte seulement `P1` à `P999`, pas `cloture`. Après le dernier prompt et
-son push approuvé, exécuter la clôture dans une session dédiée sur la branche. Ne pas transformer
-silencieusement le dernier prompt en clôture complète.
+son push approuvé, exécuter la clôture dans une session dédiée sur la branche, hors Conductor. Elle reste
+possible même si le dernier prompt a passé le lot à `done` dans le plan, tant que les commits de la
+branche le prouvent. Ne pas transformer silencieusement le dernier prompt en clôture complète.
 
 Le déploiement suit toujours les règles de `CLAUDE.md`, même si le lot est clôturé.
