@@ -59,3 +59,31 @@ d'emploi ou de dépannage matériel qui ne correspondent pas à ce ciblage.
 ## Niveau d'application
 
 Tout au niveau du compte, sauf mention contraire par campagne.
+
+## Évolution
+
+Un terme n'entre dans cette liste que s'il apparaît dans le rapport des termes de recherche réels
+(Google Ads → Termes de recherche) ou s'il est clairement hors cible au vu de son sens, sans qu'une
+recherche réelle soit nécessaire pour les cas déjà couverts par les catégories ci-dessus.
+
+Revue de la liste : chaque semaine pendant les quatre premières semaines du pilote, puis chaque mois
+ensuite.
+
+## Termes protégés
+
+Ces termes ne sont jamais exclus, quelle que soit la revue : ils désignent directement la cible
+commerciale de Tracky.
+
+- flotte
+- entreprise
+- professionnel
+- utilitaire
+- société
+- artisan
+- véhicule de service
+
+## Journal des ajouts
+
+| Date | Terme | Correspondance | Raison | Source du terme |
+|---|---|---|---|---|
+| `<à renseigner>` | `<à renseigner>` | `<à renseigner>` | `<à renseigner>` | `<à renseigner>` |
