@@ -53,8 +53,9 @@ quatre niveaux :
 `changements.md` compare toujours la semaine courante à la semaine précédente, jamais à une autre
 période :
 
-- les **mêmes requêtes figées** d'une semaine à l'autre (le panel ne change pas en cours de
-  comparaison ; le faire évoluer est un sujet séparé, voir `V5.5`) ;
+- les **mêmes requêtes figées** d'une semaine à l'autre : ce sont celles de [`PANEL.md`](./PANEL.md)
+  (le panel ne change pas en cours de comparaison ; le faire évoluer est un sujet séparé, voir
+  `V5.5`) ; chaque archive cite la version du panel utilisée pour son relevé ;
 - les **mêmes colonnes** dans `donnees-brutes.md` des deux semaines, dans le même ordre ;
 - les **mêmes unités** (clics, impressions, position moyenne…), sans conversion ni arrondi différent
   d'une semaine à l'autre.
