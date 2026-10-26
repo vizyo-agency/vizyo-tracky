@@ -11,7 +11,7 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 | 3 | **S2.11** Snippets, PDF et performance | partiel | `/lot S2.11` après redécoupage | finir ce que le sprint du 22/10 n'a pas traité |
 | 4 | **S2.12** Douze villes restantes | décision après mesure | `/lot S2.12` après arbitrage | enrichir, regrouper ou noindexer — jamais douze textes artificiels |
 | 5 | **S2.13** E-E-A-T | backlog | `/lot S2.13` | preuves publiques réelles, aucune preuve fabriquée |
-| 6 | **V5.2** Format d'archive hebdomadaire | prêt — premier lot pilote d'Agent Lot (documentaire) | `/lot V5.2 P1` | format et modèle vides dans `docs/marketing/seo/veille/`, aucune donnée réelle |
+| 6 | **V5.2** Format d'archive hebdomadaire | **fait le 26/10** — premier lot confié à Agent Lot (3 prompts, PR n° 142) | — | format et modèle vides dans `docs/marketing/seo/veille/`, aucune donnée réelle |
 
 ## Catalogue des lots
 
@@ -45,7 +45,7 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 
 ### V5 — veille
 
-`V5.1` revue mensuelle · `V5.2` archive hebdomadaire (prêt, pilote Agent Lot) · `V5.3` archivage local ·
+`V5.1` revue mensuelle · `V5.2` archive hebdomadaire (fait, pilote Agent Lot) · `V5.3` archivage local ·
 `V5.4` routine du lundi · `V5.5` panel SERP.
 
 ### C8 — intégration Vizyo Conductor
