@@ -257,6 +257,8 @@ function transform(html, out) {
   return { helmet, body };
 }
 
+// Pages dont le HTML a réellement changé à ce passage : seules elles reçoivent la date du jour dans le sitemap.
+const pagesReecrites = new Set();
 function buildPage(meta) {
   const canonical = meta.out === 'index.html' ? site.baseUrl + '/' : abs(meta.out);
   const { helmet, body } = transform(readDesign(meta.file || meta.out), meta.out);
@@ -289,6 +291,9 @@ ${body}
 </html>`;
   const leftover = html.match(/\{\{[^}]*\}\}/);
   if (leftover) console.warn('  ⚠︎ binding non résolu dans', meta.out, ':', leftover[0]);
+  let avant = null;
+  try { avant = readFileSync(pub(meta.out), 'utf8'); } catch { /* page nouvelle */ }
+  if (avant !== html) pagesReecrites.add(meta.out);
   writeFileSync(pub(meta.out), html, 'utf8');
   return meta.out === 'index.html' ? site.baseUrl + '/' : abs(meta.out);
 }
@@ -316,7 +321,7 @@ function seoWeight(out) {
 }
 function emit(meta) {
   const loc = buildPage(meta);
-  if (!meta.noSitemap) sitemapUrls.push({ loc, ...seoWeight(meta.out) });
+  if (!meta.noSitemap) sitemapUrls.push({ loc, changed: pagesReecrites.has(meta.out), ...seoWeight(meta.out) });
   built++; console.log('✓', meta.out);
 }
 
@@ -352,9 +357,15 @@ for (const c of cities.filter((x) => x.generate)) {
 
 // ── Sitemap + robots ──
 const today = new Date().toISOString().slice(0, 10);
+// lastmod = la dernière modification réelle de la page : un build qui ne change rien laisse le sitemap intact (sinon chaque build
+// redate tout le site et salit l'arbre de travail, ce qui bloque aussi Agent Lot dans Conductor).
+const lastmodPrecedent = new Map();
+try {
+  for (const m of readFileSync(pub('sitemap.xml'), 'utf8').matchAll(/<loc>([^<]+)<\/loc><lastmod>([^<]+)<\/lastmod>/g)) lastmodPrecedent.set(m[1], m[2]);
+} catch { /* premier build */ }
 const sitemap = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${sitemapUrls.map((u) => `  <url><loc>${u.loc}</loc><lastmod>${today}</lastmod><changefreq>${u.changefreq}</changefreq><priority>${u.priority}</priority></url>`).join('\n')}
+${sitemapUrls.map((u) => `  <url><loc>${u.loc}</loc><lastmod>${u.changed ? today : (lastmodPrecedent.get(u.loc) ?? today)}</lastmod><changefreq>${u.changefreq}</changefreq><priority>${u.priority}</priority></url>`).join('\n')}
 </urlset>`;
 writeFileSync(pub('sitemap.xml'), sitemap, 'utf8');
 writeFileSync(pub('robots.txt'), `User-agent: *\nAllow: /\n\nSitemap: ${site.baseUrl}/sitemap.xml\n`, 'utf8');
