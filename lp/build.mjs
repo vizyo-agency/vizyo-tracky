@@ -131,7 +131,26 @@ const opt = (a) => `padding:13px 10px;border-radius:11px;cursor:pointer;font-wei
 const tog = (a) => `flex:none;width:50px;height:28px;border-radius:16px;border:none;cursor:pointer;padding:3px;display:flex;transition:all .2s;justify-content:${a ? 'flex-end' : 'flex-start'};background:${a ? 'var(--accent)' : 'var(--border2)'}`;
 const THUMB = 'width:22px;height:22px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3)';
 const optRow = (title, note, val) => `<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--surface2);margin-bottom:14px"><div><div style="font-weight:700;font-size:.92rem">${title}</div><div style="font-size:.78rem;color:var(--tx2)">${note}</div></div><button data-sim="opt" data-val="${val}" aria-label="${esc(title)}" style="${tog(false)}"><span style="${THUMB}"></span></button></div>`;
-const resCard = (label, out, sub, accent) => `<div style="border:${accent ? '1.5px solid var(--accent)' : '1px solid var(--border)'};border-radius:12px;padding:15px;background:${accent ? 'var(--accent-soft)' : 'var(--surface2)'}"><div style="font-size:.7rem;color:var(--tx2);margin-bottom:5px">${label}</div><div data-out="${out}" style="font-size:1.35rem;font-weight:800;letter-spacing:-.02em${accent ? ';color:var(--accent)' : ''}">…</div><div${sub.o ? ` data-out="${sub.o}"` : ''} style="font-size:.66rem;color:var(--tx3);margin-top:2px">${sub.t}</div></div>`;
+const resCard = (label, out, sub, accent, val) => `<div style="border:${accent ? '1.5px solid var(--accent)' : '1px solid var(--border)'};border-radius:12px;padding:15px;background:${accent ? 'var(--accent-soft)' : 'var(--surface2)'}"><div style="font-size:.7rem;color:var(--tx2);margin-bottom:5px">${label}</div><div data-out="${out}" style="font-size:1.35rem;font-weight:800;letter-spacing:-.02em${accent ? ';color:var(--accent)' : ''}">${val}</div><div${sub.o ? ` data-out="${sub.o}"` : ''} style="font-size:.66rem;color:var(--tx3);margin-top:2px">${sub.t}</div></div>`;
+
+// ── Simulateur : valeurs par défaut (plan Pro, 5 véhicules, Sérénité, rétention 90 j, aucune option)
+// pré-calculées avec la MÊME formule que vt.js (initSim/render) — lot S2.11 P2. Mesure Lighthouse du
+// 26/10 (CLS 0,119 sur cette section) : le HTML statique affichait « … » / des champs vides que le
+// script remplissait après coup, redimensionnant la section. En bakant déjà le résultat par défaut,
+// le premier rendu de vt.js ne change plus rien : plus de place à réserver, plus de saut.
+const simFmt = (n, dec) => n.toLocaleString('fr-FR', { minimumFractionDigits: dec || 0, maximumFractionDigits: dec || 0 });
+const SIM_RET = Object.fromEntries(A.retention.map((r) => [r.key, r.perVehYear]));
+const simPerVehYear = P.pro.serenite + SIM_RET['90j'];
+const simTotalYear = simPerVehYear * 5;
+const SIM_DEFAULT = {
+  perDay: simFmt(simPerVehYear / 365, 2) + ' €',
+  perVehYear: simFmt(simPerVehYear, 0) + ' €',
+  perVehMonth: 'soit ' + simFmt(simPerVehYear / 12, 2) + ' €/mois/véh',
+  totalYear: simFmt(simTotalYear, 0) + ' €',
+  totalMonth: simFmt(simTotalYear / 12, 2) + ' €',
+  roi: simFmt(200 * 5, 0) + ' – ' + simFmt(400 * 5, 0) + ' €/an',
+  installNote: 'Tout inclus : boîtier, SIM &amp; data, pose par nos équipes et garantie. Engagement 36 mois, tarif bloqué.',
+};
 
 // ── Champs de formulaire lead (réutilisés par la section démo et le devis) ──
 const leadField = (label, name, type, req, ph) =>
@@ -195,17 +214,17 @@ ${optRow('Option Assistant IA <span style="font-weight:500;color:var(--tx3)">(op
 </div>
 <div style="height:1px;background:var(--border);margin:0 0 24px"></div>
 <div class="vt-sim4" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">
-${resCard('Par jour / véhicule', 'perDay', { t: 'tout compris' })}
-${resCard('Par véhicule / an', 'perVehYear', { o: 'perVehMonth', t: '' }, true)}
-${resCard('Total flotte / an', 'totalYear', { t: 'tout inclus, HT' })}
-${resCard('Soit par mois', 'totalMonth', { t: 'équivalent mensuel' })}
+${resCard('Par jour / véhicule', 'perDay', { t: 'tout compris' }, false, SIM_DEFAULT.perDay)}
+${resCard('Par véhicule / an', 'perVehYear', { o: 'perVehMonth', t: SIM_DEFAULT.perVehMonth }, true, SIM_DEFAULT.perVehYear)}
+${resCard('Total flotte / an', 'totalYear', { t: 'tout inclus, HT' }, false, SIM_DEFAULT.totalYear)}
+${resCard('Soit par mois', 'totalMonth', { t: 'équivalent mensuel' }, false, SIM_DEFAULT.totalMonth)}
 </div>
 <div style="border:1px solid var(--border);border-radius:12px;padding:18px;background:var(--surface2);margin-bottom:22px">
-<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><span style="font-size:.82rem;color:var(--tx2)">Économies estimées</span><span data-out="roi" style="font-weight:800;font-size:1.15rem;color:var(--accent)">…</span></div>
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><span style="font-size:.82rem;color:var(--tx2)">Économies estimées</span><span data-out="roi" style="font-weight:800;font-size:1.15rem;color:var(--accent)">${SIM_DEFAULT.roi}</span></div>
 <div style="height:8px;border-radius:5px;background:var(--border);overflow:hidden"><div style="height:100%;width:62%;background:linear-gradient(90deg,var(--accent2),var(--accent))"></div></div>
 <p style="font-size:.74rem;color:var(--tx3);margin:10px 0 0">Carburant &amp; usage maîtrisés, par an pour votre flotte.</p>
 </div>
-<div style="display:flex;align-items:flex-start;gap:9px;font-size:.82rem;color:var(--tx2);margin-bottom:22px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" style="flex:none;margin-top:1px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9z"/></svg><span data-out="installNote">Tout inclus : boîtier, SIM &amp; data, pose par nos équipes et garantie.</span></div>
+<div style="display:flex;align-items:flex-start;gap:9px;font-size:.82rem;color:var(--tx2);margin-bottom:22px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" style="flex:none;margin-top:1px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9z"/></svg><span data-out="installNote">${SIM_DEFAULT.installNote}</span></div>
 <form data-vt-lead="${site.leadApi}" data-require-accord style="display:grid;gap:14px;border-top:1px solid var(--border);padding-top:24px;text-align:left">
 <div style="font-weight:800;font-size:1.05rem;text-align:center;margin-bottom:2px">Recevez ce devis et validez-le</div>
 <input type="hidden" name="message"><input type="hidden" name="fleetSize">
