@@ -27,7 +27,7 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 ### S2 — SEO et site
 
 `S2.1` relevé J+4 · `S2.2` corrections courtes · `S2.3` pack visuel · `S2.4` vidéos ·
-`S2.5` plan de contenus · `S2.6` pages métier · `S2.7` audit Situaction · `S2.8` landing Toulouse
+`S2.5` plan de contenus · `S2.6` pages métier · `S2.7` audit d’un concurrent local · `S2.8` landing Toulouse
 (fait) · `S2.9` maillage et entités (fait) · `S2.10` hub Occitanie (fait) · `S2.11` snippets/PDF/perf
 (partiel) · `S2.12` pages locales (Toulouse faite, 12 restantes) · `S2.13` E-E-A-T.
 
@@ -63,8 +63,8 @@ sont **à vérifier sur l'instance Conductor**. Voir [`CONDUCTOR.md`](CONDUCTOR.
 
 `P6.1` refonte admin · `P6.2` étude dashcam/particulier/éthanol · `P6.3` agenda CDEF + tutoriel ·
 `P6.4` lancement Ads et influence locale. Ces quatre cartes doivent être qualifiées avant découpage :
-aucune ne part en code sous son intitulé actuel. `P6.5` conserve la trace de la démo historique pour
-Ibti, déjà clôturée ; elle ne doit pas revenir dans le flux actif.
+aucune ne part en code sous son intitulé actuel. `P6.5` conserve la trace d’une démo historique,
+déjà clôturée ; elle ne doit pas revenir dans le flux actif.
 
 ### H7 — historique clôturé
 
@@ -74,4 +74,4 @@ dans Asana. Elles restent visibles pour la traçabilité, mais le lanceur `/lot`
 ## Règle de préparation
 
 Tous les lots existent dans le plan, mais seuls les lots proches du démarrage sont découpés. C'est
-la même règle que NISIV : ne pas fabriquer cinquante prompts qui vieilliront avant leur exécution.
+la même règle que les autres projets de l’organisation : ne pas fabriquer cinquante prompts qui vieilliront avant leur exécution.
