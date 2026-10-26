@@ -59,7 +59,7 @@ pas la même autorisation.
 État constaté le 26/10/2026 (soir) : le dépôt est transféré à `vizyo-agency/vizyo-tracky`, `main` est protégée
 (une approbation requise, aucun contrôle requis), le pilotage `/lot` est fusionné (PR n° 139 à 141), Agent Lot est
 embauché et configuré en profil pilote sur l'instance dev, et V5.2 a été exécuté de bout en bout (PR n° 142).
-Seul C8.5 reste à faire (inventaire des secrets, sans valeurs). Voir [`CONDUCTOR.md`](CONDUCTOR.md).
+C8.5 (inventaire des secrets, sans valeurs) est fait : aucun secret propre au projet. Voir [`CONDUCTOR.md`](CONDUCTOR.md).
 
 ### P6 — produit TRACKY
 
