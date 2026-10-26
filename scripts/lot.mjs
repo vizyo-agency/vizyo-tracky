@@ -4,11 +4,22 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PLAN_PATH = join(REPO, 'docs', 'pilotage', 'plan.json');
-const DECOUPE_DIR = join(REPO, 'docs', 'pilotage', 'decoupe');
-export const LOT_ID = /^[A-Z]\d\.\d+$/;
 
-export function loadPlan(path = PLAN_PATH) {
+export const LOT_ID = /^[A-Z]\d\.\d+$/;
+export const PROMPT_ID = /^P\d{1,3}$/;
+
+/** Codes de sortie du processus (contrat Conductor v1 : `docs/pilotage/CONDUCTOR.md`). */
+export const EXIT = Object.freeze({ READY: 0, ERROR: 2, BLOCKED: 3, ACTION_REQUIRED: 4 });
+export const CONDUCTOR_RESULT_VERSION = 1;
+export const ACCEPTED_BRANCHES = Object.freeze(['conductor/<agent>/<exec>', 'lot/<ID>-<slug>']);
+export const HUMAN_ACTION_TYPES = Object.freeze(['authenticated-browser', 'secret', 'decision', 'external-submit', 'deployment']);
+export const EVIDENCE_RULE = 'file_exists_nonempty';
+
+const CONDUCTOR_BRANCH = /^conductor\/[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const LOT_BRANCH = /^lot\/([A-Z]\d\.\d+)-([a-z0-9][a-z0-9._-]*)$/;
+const PROTECTED_BRANCHES = new Set(['main', 'master', 'dev', 'develop', 'prd', 'prod', 'production', 'staging']);
+
+export function loadPlan(path = join(REPO, 'docs', 'pilotage', 'plan.json')) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
@@ -47,7 +58,32 @@ export function statusGate(lot, gate) {
   return { ready: false, reason: reasons[lot.status] ?? `STATUT BLOQUANT — ${lot.status}.` };
 }
 
-export function conductorGate(lot, promptId = null, decoupage = null, fileExists = existsSync) {
+/**
+ * Branche d'exécution en mode Conductor : `conductor/<agent>/<exec>` (préfixe natif de Conductor) ou
+ * `lot/<ID>-<slug>` du MÊME lot (et, si le plan en déclare une, exactement celle-là). Jamais HEAD détaché, jamais `main`.
+ */
+export function classifyBranch(current, lot, expected = null) {
+  if (!current) {
+    return { ok: false, reason: 'HEAD détaché : Conductor doit fournir ou créer une branche conductor/<agent>/<exec> ou lot/<ID>-<slug> avant d’exécuter' };
+  }
+  if (PROTECTED_BRANCHES.has(current)) return { ok: false, reason: `branche protégée « ${current} » : jamais d’exécution ici` };
+  if (current.includes('..')) return { ok: false, reason: `nom de branche « ${current} » non sûr` };
+  if (CONDUCTOR_BRANCH.test(current)) return { ok: true, kind: 'conductor' };
+  const match = LOT_BRANCH.exec(current);
+  if (match) {
+    if (match[1] !== lot.id) return { ok: false, reason: `branche « ${current} » appartient au lot ${match[1]}, pas à ${lot.id}` };
+    if (expected && current !== expected) return { ok: false, reason: `branche « ${current} » ≠ branche du lot « ${expected} »` };
+    return { ok: true, kind: 'lot' };
+  }
+  return { ok: false, reason: `branche « ${current} » non conforme : attendu ${ACCEPTED_BRANCHES.join(' ou ')}` };
+}
+
+function normalizeEvidenceVerdict(verdict) {
+  if (typeof verdict === 'boolean') return { ok: verdict, reason: verdict ? null : 'fichier de preuve absent' };
+  return verdict;
+}
+
+export function conductorGate(lot, promptId = null, decoupage = null, checkEvidence = null) {
   if (!promptId || promptId === 'CLOTURE') {
     return {
       ready: false,
@@ -67,13 +103,13 @@ export function conductorGate(lot, promptId = null, decoupage = null, fileExists
   }
   const action = (execution.actions ?? []).find((candidate) => candidate.before_prompt === promptId);
   if (action) {
-    const output = action.output ? join(REPO, action.output) : null;
-    if (!output || !fileExists(output)) {
+    const verdict = normalizeEvidenceVerdict(checkEvidence ? checkEvidence(action.output) : Boolean(action.output) && existsSync(join(REPO, action.output)));
+    if (!verdict.ok) {
       return {
         ready: false,
         actionRequired: true,
         action,
-        reason: `${action.id} doit être réalisée avant ${promptId}.`,
+        reason: `${action.id} doit être réalisée avant ${promptId}${verdict.reason ? ` (${verdict.reason})` : ''}.`,
       };
     }
   }
@@ -87,7 +123,8 @@ function splitField(value) {
     .filter(Boolean);
 }
 
-export function parseDecoupage(text) {
+export function parseDecoupage(rawText) {
+  const text = String(rawText).normalize('NFC');
   const header = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(text);
   if (!header) throw new Error('en-tête YAML manquant');
   const meta = Object.fromEntries(
@@ -138,6 +175,10 @@ export function commitMessage(lot, step, prompt) {
   return `[${lot.id}] ${prompt.id} — ${prompt.title}`;
 }
 
+/**
+ * Les prompts d'un lot déjà committés : `[<ID>] P<n> — …` N'IMPORTE OÙ dans le sujet
+ * (« contrat: [D3.4] P1 — … » reste reconnu), comme le fait Conductor (`estLeCommitDuPrompt`).
+ */
 export function completedPrompts(lot, subjects) {
   const result = new Set();
   const prefix = `[${lot.id}] `;
@@ -149,7 +190,18 @@ export function completedPrompts(lot, subjects) {
   return result;
 }
 
-export function validatePlan(plan) {
+/** Les prompts de la branche qui n'ont pas de commit (clôture). Une étape sans branche vaut pour toutes. */
+export function remainingPrompts(decoupage, branch, done) {
+  const remaining = [];
+  for (const step of decoupage.steps) {
+    if (step.branch && branch && step.branch !== branch) continue;
+    for (const prompt of step.prompts) if (!done.has(prompt.id)) remaining.push(prompt.id);
+  }
+  return remaining;
+}
+
+export function validatePlan(plan, options = {}) {
+  const decoupeDir = options.decoupeDir ?? join(REPO, 'docs', 'pilotage', 'decoupe');
   const errors = [];
   const ids = new Set();
   const asana = new Set();
@@ -159,11 +211,12 @@ export function validatePlan(plan) {
     ids.add(lot.id);
     if (!plan.statuses?.includes(lot.status)) errors.push(`${lot.id}: statut ${lot.status} inconnu`);
     if (!(lot.done_when?.length > 0)) errors.push(`${lot.id}: done_when vide`);
-    if (['conductor-agent-lot', 'conductor-assisted'].includes(lot.execution?.mode)) {
+    const conductorMode = ['conductor-agent-lot', 'conductor-assisted'].includes(lot.execution?.mode);
+    if (conductorMode) {
       if (!lot.branch) errors.push(`${lot.id}: branche requise pour Conductor`);
       if (!(lot.execution.prompts?.length > 0)) errors.push(`${lot.id}: prompts Conductor vides`);
       for (const prompt of lot.execution.prompts ?? []) {
-        if (!/^P\d{1,3}$/.test(prompt)) errors.push(`${lot.id}: prompt Conductor invalide ${prompt}`);
+        if (!PROMPT_ID.test(prompt)) errors.push(`${lot.id}: prompt Conductor invalide ${prompt}`);
       }
       for (const action of lot.execution.actions ?? []) {
         if (!action.id) errors.push(`${lot.id}: action Conductor sans identifiant`);
@@ -184,7 +237,7 @@ export function validatePlan(plan) {
       if (!ids.has(dependency)) errors.push(`${lot.id}: dépendance inconnue ${dependency}`);
       if (dependency === lot.id) errors.push(`${lot.id}: dépend de lui-même`);
     }
-    const file = join(DECOUPE_DIR, `${lot.id}.md`);
+    const file = join(decoupeDir, `${lot.id}.md`);
     if (['conductor-agent-lot', 'conductor-assisted'].includes(lot.execution?.mode) && !existsSync(file)) {
       errors.push(`${lot.id}: découpage requis pour Conductor`);
     }
@@ -215,51 +268,41 @@ export function validatePlan(plan) {
   return errors;
 }
 
-function git(args, fallback = '') {
+/** Accès git du poste. `branch()` rend '' pour un HEAD détaché ; toute panne de git LÈVE (jamais « aucun commit »). */
+export function makeGit(repo = REPO) {
+  const run = (args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  return {
+    branch: () => run(['branch', '--show-current']),
+    subjects: () => {
+      try {
+        return run(['log', '--format=%s', '-n', '2000']).split(/\r?\n/).filter(Boolean);
+      } catch (error) {
+        // Une branche sans aucun commit n'a pas d'historique : ce n'est pas une panne de git.
+        if (/does not have any commits yet|unknown revision/.test(String(error.stderr ?? error.message))) return [];
+        throw error;
+      }
+    },
+  };
+}
+
+function safeGit(git) {
+  const result = { branch: null, branchError: null, subjects: null };
   try {
-    return execFileSync('git', args, { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch {
-    return fallback;
+    result.branch = git.branch();
+  } catch (error) {
+    result.branchError = String(error.message ?? error).split('\n')[0];
   }
+  try {
+    result.subjects = git.subjects();
+  } catch (error) {
+    result.subjects = null;
+    result.branchError ??= String(error.message ?? error).split('\n')[0];
+  }
+  return result;
 }
 
-function decoupageFor(lot) {
-  const path = join(DECOUPE_DIR, `${lot.id}.md`);
-  return existsSync(path) ? parseDecoupage(readFileSync(path, 'utf8')) : null;
-}
-
-function formatDate(date) {
+export function formatDate(date) {
   return new Intl.DateTimeFormat('fr-FR', { dateStyle: 'full', timeStyle: 'short', timeZone: 'Europe/Paris' }).format(date);
-}
-
-function printBrief(lot, states, gate, workflow, decoupage, done) {
-  console.log(`# [${lot.id}] ${lot.title}`);
-  console.log(`${lot.responsible} · relu par ${lot.reviewer} · ${lot.track} · ${lot.estimate_hours || '?'} h · ${lot.status}`);
-  if (lot.execution?.mode) console.log(`Exécution : ${lot.execution.mode}`);
-  if (states.length === 0) console.log('\n**Dépendances** : aucune.');
-  else {
-    console.log('\n**Dépendances**');
-    for (const state of states) console.log(`- ${state.id} — ${state.status}${state.title ? ` — ${state.title}` : ''}`);
-  }
-  if (!gate.ready) console.log(`\n**TROP TÔT** — attendre ${formatDate(gate.date)}.`);
-  else if (!dependenciesReady(states)) console.log('\n**PAS PRÊT** — une dépendance n’est pas close.');
-  else if (!workflow.ready) console.log(`\n**${workflow.reason}**`);
-  else console.log('\n**PRÊT** — le lot peut commencer.');
-  console.log(`\n## Pourquoi\n${lot.why ?? 'Voir les critères et les sources.'}`);
-  console.log('\n## Fait quand');
-  for (const criterion of lot.done_when) console.log(`- ${criterion}`);
-  console.log('\n## Sources');
-  for (const source of lot.sources ?? []) console.log(`- ${source}`);
-  if (decoupage) {
-    console.log(`\n## Découpage — état au ${decoupage.etat_au}\n${decoupage.state}`);
-    for (const step of decoupage.steps) {
-      console.log(`\n**Étape ${step.number} · ${step.title}** — ${step.responsible}`);
-      for (const prompt of step.prompts) console.log(`- ${done.has(prompt.id) ? '✓' : '○'} \`/lot ${lot.id} ${prompt.id}\` ${prompt.title} — ${prompt.duration} min`);
-    }
-    console.log(`- ○ \`/lot ${lot.id} cloture\``);
-  } else {
-    console.log('\nAucun découpage. Si le lot dépasse quatre heures, le découper avant de coder.');
-  }
 }
 
 function findPrompt(decoupage, id) {
@@ -270,146 +313,316 @@ function findPrompt(decoupage, id) {
   return null;
 }
 
-function printHumanAction(lot, action) {
-  console.log(`\n## ACTION HUMAINE REQUISE — ${action.id}`);
-  console.log(`Type : ${action.type}`);
-  console.log(`Responsable : ${action.owner ?? lot.responsible}`);
-  console.log(`Action : ${action.title}`);
-  if (action.url) console.log(`Ouvrir : ${action.url}`);
-  console.log(`Preuve attendue : ${action.output}`);
-  console.log(`Reprise : /lot ${lot.id} ${action.resume_prompt}`);
+function printBrief(io, lot, states, gate, workflow, decoupage, done, verdict = null) {
+  const { log } = io;
+  log(`# [${lot.id}] ${lot.title}`);
+  log(`${lot.responsible} · relu par ${lot.reviewer} · ${lot.track} · ${lot.estimate_hours || '?'} h · ${lot.status}`);
+  if (lot.execution?.mode) log(`Exécution : ${lot.execution.mode}`);
+  if (states.length === 0) log('\n**Dépendances** : aucune.');
+  else {
+    log('\n**Dépendances**');
+    for (const state of states) log(`- ${state.id} — ${state.status}${state.title ? ` — ${state.title}` : ''}`);
+  }
+  if (verdict) log(`\n**${verdict}**`);
+  else if (!gate.ready) log(`\n**TROP TÔT** — attendre ${gate.date ? formatDate(gate.date) : 'la date minimale'}.`);
+  else if (!dependenciesReady(states)) log('\n**PAS PRÊT** — une dépendance n’est pas close.');
+  else if (!workflow.ready) log(`\n**${workflow.reason}**`);
+  else log('\n**PRÊT** — le lot peut commencer.');
+  log(`\n## Pourquoi\n${lot.why ?? 'Voir les critères et les sources.'}`);
+  log('\n## Fait quand');
+  for (const criterion of lot.done_when) log(`- ${criterion}`);
+  log('\n## Sources');
+  for (const source of lot.sources ?? []) log(`- ${source}`);
+  if (decoupage) {
+    log(`\n## Découpage — état au ${decoupage.etat_au}\n${decoupage.state}`);
+    for (const step of decoupage.steps) {
+      log(`\n**Étape ${step.number} · ${step.title}** — ${step.responsible}`);
+      for (const prompt of step.prompts) log(`- ${done.has(prompt.id) ? '✓' : '○'} \`/lot ${lot.id} ${prompt.id}\` ${prompt.title} — ${prompt.duration} min`);
+    }
+    log(`- ○ \`/lot ${lot.id} cloture\``);
+  } else {
+    log('\nAucun découpage. Si le lot dépasse quatre heures, le découper avant de coder.');
+  }
+}
+
+function printHumanAction(io, lot, action) {
+  const { log } = io;
+  log(`\n## ACTION HUMAINE REQUISE — ${action.id}`);
+  log(`Type : ${action.type}`);
+  log(`Responsable : ${action.owner ?? lot.responsible}`);
+  log(`Action : ${action.title}`);
+  if (action.url) log(`Ouvrir : ${action.url}`);
+  log(`Preuve attendue : ${action.output}`);
+  log(`Reprise : /lot ${lot.id} ${action.resume_prompt}`);
   if (action.instructions?.length) {
-    console.log('\nÀ faire');
-    for (const instruction of action.instructions) console.log(`- ${instruction}`);
+    log('\nÀ faire');
+    for (const instruction of action.instructions) log(`- ${instruction}`);
   }
   if (action.forbidden?.length) {
-    console.log('\nInterdit pendant cette action');
-    for (const item of action.forbidden) console.log(`- ${item}`);
+    log('\nInterdit pendant cette action');
+    for (const item of action.forbidden) log(`- ${item}`);
   }
-  console.log('\nConductor doit créer une tâche humaine durable, puis mettre le run en attente. Ce n’est ni un échec ni une approbation de code.');
+  log('\nConductor doit créer une tâche humaine durable, puis mettre le run en attente (code de sortie 4). Ce n’est ni un échec ni une approbation de code.');
+}
+
+/** L'action telle que Conductor la lit : `CONDUCTOR_RESULT.action` (contrat v1). Aucune valeur de compte ni de secret. */
+export function actionPayload(lot, action) {
+  return {
+    id: action.id,
+    type: action.type,
+    responsible: action.owner ?? lot.responsible ?? null,
+    url: action.url ?? null,
+    instructions: action.instructions ?? [],
+    forbidden: action.forbidden ?? [],
+    evidence_path: action.output,
+    evidence_rule: EVIDENCE_RULE,
+    resume_command: `/lot ${lot.id} ${action.resume_prompt}`,
+    not_before: action.not_before ?? lot.not_before ?? null,
+  };
+}
+
+export function conductorLine(result) {
+  return `CONDUCTOR_RESULT ${JSON.stringify({
+    version: CONDUCTOR_RESULT_VERSION,
+    status: result.status,
+    exit_code: result.exit_code,
+    lot: result.lot ?? null,
+    prompt: result.prompt ?? null,
+    reason: result.reason ?? null,
+    branch: { current: result.current ?? null, accepted: [...ACCEPTED_BRANCHES] },
+    action: result.action ?? null,
+    commit_message: result.commit_message ?? null,
+  })}`;
+}
+
+function parseArgs(argv) {
+  const options = { check: false, conductor: false, replay: false, since: null, positional: [], unknown: [] };
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = String(argv[index]);
+    if (argument === '--check' && index === 0) options.check = true;
+    else if (argument === '--conductor') options.conductor = true;
+    // Conductor passe encore `--depuis origin/<base>` (versions antérieures au contrat v1) : accepté, sans effet.
+    else if (argument === '--depuis') options.since = String(argv[(index += 1)] ?? '');
+    else if (argument.startsWith('--')) options.unknown.push(argument);
+    else options.positional.push(argument);
+  }
+  return options;
+}
+
+/**
+ * Cœur du script, sans effet de bord : rend `{ exitCode, stdout, stderr }`. `env` injecte le dépôt, le plan, l'horloge,
+ * git et la lecture de la preuve (les tests), le défaut est le poste réel.
+ */
+export function run(argv = [], env = {}) {
+  const repo = env.repo ?? REPO;
+  const planPath = env.planPath ?? join(repo, 'docs', 'pilotage', 'plan.json');
+  const decoupeDir = env.decoupeDir ?? join(repo, 'docs', 'pilotage', 'decoupe');
+  const now = env.now ?? new Date();
+  const git = env.git ?? makeGit(repo);
+  const evidenceOf = env.checkEvidence ?? ((path) => existsSync(join(repo, path)));
+
+  const out = [];
+  const err = [];
+  const io = { log: (line = '') => out.push(String(line)), error: (line = '') => err.push(String(line)) };
+  const options = parseArgs(argv);
+  const conductorMode = options.conductor;
+  const state = { lot: null, prompt: null, current: null, action: null, commit: null };
+
+  const finish = (status, exitCode, reason = null) => {
+    if (conductorMode) {
+      io.log(conductorLine({ status, exit_code: exitCode, lot: state.lot, prompt: state.prompt, reason, current: state.current, action: state.action, commit_message: state.commit }));
+    }
+    return { exitCode, stdout: out.length ? `${out.join('\n')}\n` : '', stderr: err.length ? `${err.join('\n')}\n` : '' };
+  };
+  const usage = (message) => {
+    io.error(message);
+    return finish('error', EXIT.ERROR, message);
+  };
+
+  try {
+    return runChecked();
+  } catch (error) {
+    const message = `Erreur interne : ${error?.message ?? error}`;
+    io.error(message);
+    return finish('error', EXIT.ERROR, message);
+  }
+
+  function runChecked() {
+    if (options.unknown.length) return usage(`Option inconnue : ${options.unknown.join(', ')}`);
+    if (options.since !== null && !options.since) return usage('--depuis attend une référence git.');
+
+    let plan;
+    try {
+      plan = loadPlan(planPath);
+    } catch (error) {
+      return usage(`Plan illisible : ${error.message}`);
+    }
+    const errors = validatePlan(plan, { decoupeDir });
+    if (options.check) {
+      if (conductorMode) return usage('--check ne se combine pas avec --conductor.');
+      if (errors.length) {
+        for (const message of errors) io.error(`- ${message}`);
+        return finish('error', EXIT.ERROR);
+      }
+      io.log(`OK — ${plan.lots.length} lots valides.`);
+      return finish('ready', EXIT.READY);
+    }
+    const id = String(options.positional[0] ?? '').toUpperCase();
+    state.lot = id || null;
+    const rawMode = String(options.positional[1] ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+    state.prompt = rawMode === 'cloture' ? 'cloture' : rawMode ? rawMode.toUpperCase() : null;
+    if (errors.length) {
+      io.error('Plan invalide :');
+      for (const message of errors) io.error(`- ${message}`);
+      return finish('error', EXIT.ERROR, `plan invalide (${errors.length} erreur(s)) : ${errors[0]}`);
+    }
+    if (!LOT_ID.test(id)) return usage('Usage : node scripts/lot.mjs <ID> [P<n> | cloture] [--conductor]');
+    const all = lotMap(plan);
+    const lot = all.get(id);
+    if (!lot) return usage(`Lot inconnu : ${id}`);
+    if (conductorMode) {
+      if (!state.prompt) return usage('Un prompt P1 à P999 est requis avec --conductor.');
+      if (state.prompt !== 'cloture' && !PROMPT_ID.test(state.prompt)) return usage(`Prompt invalide : ${options.positional[1]}`);
+    }
+
+    const g = safeGit(git);
+    if (g.branch !== null) state.current = g.branch || null;
+    const currentBranch = g.branch ?? '';
+    const done = completedPrompts(lot, g.subjects ?? []);
+    const states = dependencyStates(lot, all);
+    const gate = dateGate(lot, now);
+    let workflow = statusGate(lot, gate);
+    const decoupagePath = join(decoupeDir, `${lot.id}.md`);
+    const decoupage = existsSync(decoupagePath) ? parseDecoupage(readFileSync(decoupagePath, 'utf8')) : null;
+    const wantsCloture = state.prompt === 'cloture';
+
+    const early = PROMPT_ID.test(state.prompt ?? '') ? findPrompt(decoupage, state.prompt) : null;
+    if (early) state.commit = commitMessage(lot, early.step, early.prompt);
+
+    if (!gate.ready || !dependenciesReady(states) || !workflow.ready) {
+      printBrief(io, lot, states, gate, workflow, decoupage, done);
+      const open = states.filter((dependency) => dependency.status !== 'done').map((dependency) => `${dependency.id} (${dependency.status})`);
+      if (!gate.ready) return finish('too_early', EXIT.BLOCKED, `TROP TÔT — attendre ${formatDate(gate.date)}.`);
+      if (open.length) return finish('blocked', EXIT.BLOCKED, `PAS PRÊT — dépendance(s) ouverte(s) : ${open.join(', ')}.`);
+      return finish('blocked', EXIT.BLOCKED, workflow.reason);
+    }
+
+    if (conductorMode) {
+      if (wantsCloture) {
+        printBrief(io, lot, states, gate, workflow, decoupage, done);
+        const reason = conductorGate(lot, 'CLOTURE', decoupage).reason;
+        io.log(`\n**NON COMPATIBLE CONDUCTOR** — ${reason}`);
+        return finish('blocked', EXIT.BLOCKED, reason);
+      }
+      if (!decoupage) {
+        const reason = 'Lot non découpé : Agent Lot ne code que des prompts d’un découpage.';
+        printBrief(io, lot, states, gate, workflow, decoupage, done);
+        io.log(`\n**NON COMPATIBLE CONDUCTOR** — ${reason}`);
+        return finish('blocked', EXIT.BLOCKED, reason);
+      }
+      if (!findPrompt(decoupage, state.prompt)) return usage(`Prompt inconnu : ${id} ${state.prompt}`);
+    }
+
+    if (!state.prompt) {
+      printBrief(io, lot, states, gate, workflow, decoupage, done);
+      return finish('ready', EXIT.READY);
+    }
+
+    if (wantsCloture) return closeLot();
+
+    if (!PROMPT_ID.test(state.prompt) || !decoupage) return usage(`Prompt invalide ou lot non découpé : ${options.positional[1]}`);
+    const found = findPrompt(decoupage, state.prompt);
+    if (!found) return usage(`Prompt inconnu : ${id} ${state.prompt}`);
+    const { step, prompt } = found;
+    state.commit = commitMessage(lot, step, prompt);
+    const expectedBranch = step.branch ?? lot.branch ?? null;
+
+    const allowed = lot.execution?.prompts;
+    if (conductorMode && allowed?.length && !allowed.includes(prompt.id)) {
+      const reason = `${prompt.id} n’est pas autorisé dans Conductor pour ce lot.`;
+      io.log(`# [${lot.id}] ${prompt.id}\n\n**NON COMPATIBLE CONDUCTOR** — ${reason}`);
+      return finish('blocked', EXIT.BLOCKED, reason);
+    }
+
+    if (g.branch === null || g.subjects === null) {
+      io.error(`git indisponible : ${g.branchError ?? 'erreur inconnue'}`);
+      return finish('error', EXIT.ERROR, `git indisponible : ${g.branchError ?? 'erreur inconnue'}`);
+    }
+    if (conductorMode) {
+      const verdict = classifyBranch(currentBranch, lot, expectedBranch);
+      if (!verdict.ok) {
+        io.log(`# [${lot.id}] ${prompt.id}\n\n**MAUVAISE BRANCHE** — ${verdict.reason}. S'arrêter.`);
+        return finish('blocked', EXIT.BLOCKED, `MAUVAISE BRANCHE — ${verdict.reason}`);
+      }
+    } else if (expectedBranch && currentBranch !== expectedBranch) {
+      io.log(`# [${lot.id}] ${prompt.id}\n\n**MAUVAISE BRANCHE** — session sur \`${currentBranch || 'inconnue'}\`, prompt sur \`${expectedBranch}\`. S'arrêter.`);
+      return finish('blocked', EXIT.BLOCKED, 'MAUVAISE BRANCHE');
+    }
+
+    if (conductorMode) {
+      const conductor = conductorGate(lot, prompt.id, decoupage, evidenceOf);
+      if (!conductor.ready) {
+        if (conductor.actionRequired) {
+          printBrief(io, lot, states, gate, workflow, decoupage, done, 'ACTION HUMAINE REQUISE — le lot n’est pas bloqué, une personne doit agir avant ce prompt');
+          printHumanAction(io, lot, conductor.action);
+          state.action = actionPayload(lot, conductor.action);
+          return finish('action_required', EXIT.ACTION_REQUIRED, conductor.reason);
+        }
+        io.log(`\n**NON COMPATIBLE CONDUCTOR** — ${conductor.reason}`);
+        return finish('blocked', EXIT.BLOCKED, conductor.reason);
+      }
+    }
+
+    io.log(`# [${lot.id}] ${prompt.id} · ${prompt.title} — ${prompt.duration} min`);
+    io.log(`Étape ${step.number} · ${step.title} — ${step.responsible} · branche \`${step.branch ?? lot.branch ?? 'à créer'}\``);
+    if (conductorMode) {
+      io.log('\n## Conductor');
+      io.log('- Travailler dans le worktree isolé fourni ; ne pas créer de worktree imbriqué.');
+      io.log('- Commiter avec le message exact, mais ne pas pousser, ouvrir de PR ou déployer.');
+      io.log('- Rendre le commit à Conductor : la plateforme proposera le push à la validation humaine.');
+    }
+    if (done.has(prompt.id)) io.log(`\n⚠️ ${prompt.id} a déjà un commit.`);
+    for (const [title, values] of [['Fichiers', prompt.files], ['Sources', prompt.sources], ['Faire', prompt.actions]]) {
+      io.log(`\n## ${title}`);
+      for (const value of values) io.log(`- ${value}`);
+    }
+    io.log(`\n## Test\n${prompt.test}`);
+    io.log(`\n## Fini quand\n${prompt.done}`);
+    io.log(`\n## Hors périmètre\n${prompt.out}`);
+    io.log(`\n## Commit\n${state.commit}`);
+    return finish('ready', EXIT.READY);
+
+    function closeLot() {
+      if (!decoupage) {
+        io.log(`# [${lot.id}] clôture\n\nLot sans découpage : vérifier chaque critère puis suivre GUIDE § 3.`);
+        return finish('ready', EXIT.READY);
+      }
+      if (g.branch === null || g.subjects === null) {
+        io.error(`git indisponible : ${g.branchError ?? 'erreur inconnue'}`);
+        return finish('error', EXIT.ERROR, `git indisponible : ${g.branchError ?? 'erreur inconnue'}`);
+      }
+      if (lot.branch && currentBranch !== lot.branch) {
+        io.log(`# [${lot.id}] clôture\n\n**MAUVAISE BRANCHE** — session sur \`${currentBranch || 'inconnue'}\`, lot sur \`${lot.branch}\`. S'arrêter.`);
+        return finish('blocked', EXIT.BLOCKED, 'MAUVAISE BRANCHE');
+      }
+      const remaining = remainingPrompts(decoupage, currentBranch, done);
+      io.log(`# [${lot.id}] clôture — branche ${currentBranch || 'inconnue'}`);
+      if (remaining.length) {
+        const reason = `PAS PRÊTE — prompts sans commit : ${remaining.join(', ')}.`;
+        io.log(`\n**${reason}**`);
+        return finish('blocked', EXIT.BLOCKED, reason);
+      }
+      io.log('\n**PRÊTE** — lancer les contrôles, les deux relectures et la PR selon le skill.');
+      return finish('ready', EXIT.READY);
+    }
+  }
 }
 
 function main(argv = process.argv.slice(2)) {
-  const plan = loadPlan();
-  const errors = validatePlan(plan);
-  if (argv[0] === '--check') {
-    if (errors.length) {
-      for (const error of errors) console.error(`- ${error}`);
-      process.exitCode = 2;
-    } else console.log(`OK — ${plan.lots.length} lots valides.`);
-    return;
-  }
-  if (errors.length) {
-    console.error('Plan invalide :');
-    for (const error of errors) console.error(`- ${error}`);
-    process.exitCode = 2;
-    return;
-  }
-
-  const id = String(argv[0] ?? '').toUpperCase();
-  if (!LOT_ID.test(id)) {
-    console.error('Usage : node scripts/lot.mjs <ID> [P<n> | cloture]');
-    process.exitCode = 2;
-    return;
-  }
-  const all = lotMap(plan);
-  const lot = all.get(id);
-  if (!lot) {
-    console.error(`Lot inconnu : ${id}`);
-    process.exitCode = 2;
-    return;
-  }
-  const states = dependencyStates(lot, all);
-  const gate = dateGate(lot);
-  const workflow = statusGate(lot, gate);
-  const decoupage = decoupageFor(lot);
-  const subjects = git(['log', '--format=%s'], '').split(/\r?\n/).filter(Boolean);
-  const done = completedPrompts(lot, subjects);
-  const rawMode = argv.slice(1).find((argument) => !String(argument).startsWith('--')) ?? '';
-  const mode = String(rawMode).normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
-  const conductorMode = argv.includes('--conductor');
-  const conductor = conductorGate(lot, mode ? mode.toUpperCase() : null, decoupage);
-
-  if (!gate.ready || !dependenciesReady(states) || !workflow.ready) {
-    printBrief(lot, states, gate, workflow, decoupage, done);
-    process.exitCode = 3;
-    return;
-  }
-  if (conductorMode && !conductor.ready) {
-    printBrief(lot, states, gate, workflow, decoupage, done);
-    if (conductor.actionRequired) {
-      printHumanAction(lot, conductor.action);
-      process.exitCode = 4;
-    } else {
-      console.log(`\n**NON COMPATIBLE CONDUCTOR** — ${conductor.reason}`);
-      process.exitCode = 3;
-    }
-    return;
-  }
-  if (!mode) {
-    printBrief(lot, states, gate, workflow, decoupage, done);
-    return;
-  }
-  if (mode === 'cloture') {
-    if (!decoupage) {
-      console.log(`# [${lot.id}] clôture\n\nLot sans découpage : vérifier chaque critère puis suivre GUIDE § 3.`);
-      return;
-    }
-    const branch = git(['branch', '--show-current'], '');
-    if (lot.branch && branch !== lot.branch) {
-      console.log(`# [${lot.id}] clôture\n\n**MAUVAISE BRANCHE** — session sur \`${branch || 'inconnue'}\`, lot sur \`${lot.branch}\`. S'arrêter.`);
-      process.exitCode = 3;
-      return;
-    }
-    const remaining = [];
-    for (const step of decoupage.steps) {
-      if (step.branch && branch && step.branch !== branch) continue;
-      for (const prompt of step.prompts) if (!done.has(prompt.id)) remaining.push(prompt.id);
-    }
-    console.log(`# [${lot.id}] clôture — branche ${branch || 'inconnue'}`);
-    if (remaining.length) {
-      console.log(`\n**PAS PRÊTE** — prompts sans commit : ${remaining.join(', ')}.`);
-      process.exitCode = 3;
-    } else console.log('\n**PRÊTE** — lancer les contrôles, les deux relectures et la PR selon le skill.');
-    return;
-  }
-  const promptId = mode.toUpperCase();
-  if (!/^P\d+$/.test(promptId) || !decoupage) {
-    console.error(`Prompt invalide ou lot non découpé : ${argv[1]}`);
-    process.exitCode = 2;
-    return;
-  }
-  const found = findPrompt(decoupage, promptId);
-  if (!found) {
-    console.error(`Prompt inconnu : ${id} ${promptId}`);
-    process.exitCode = 2;
-    return;
-  }
-  const { step, prompt } = found;
-  const branch = git(['branch', '--show-current'], '');
-  const expectedBranch = step.branch ?? lot.branch;
-  if (expectedBranch && branch !== expectedBranch) {
-    console.log(`# [${lot.id}] ${prompt.id}\n\n**MAUVAISE BRANCHE** — session sur \`${branch || 'inconnue'}\`, prompt sur \`${expectedBranch}\`. S'arrêter.`);
-    process.exitCode = 3;
-    return;
-  }
-  console.log(`# [${lot.id}] ${prompt.id} · ${prompt.title} — ${prompt.duration} min`);
-  console.log(`Étape ${step.number} · ${step.title} — ${step.responsible} · branche \`${step.branch ?? lot.branch ?? 'à créer'}\``);
-  if (conductorMode) {
-    console.log('\n## Conductor');
-    console.log('- Travailler dans le worktree isolé fourni ; ne pas créer de worktree imbriqué.');
-    console.log('- Commiter avec le message exact, mais ne pas pousser, ouvrir de PR ou déployer.');
-    console.log('- Rendre le commit à Conductor : la plateforme proposera le push à la validation humaine.');
-  }
-  if (done.has(prompt.id)) console.log(`\n⚠️ ${prompt.id} a déjà un commit.`);
-  for (const [title, values] of [['Fichiers', prompt.files], ['Sources', prompt.sources], ['Faire', prompt.actions]]) {
-    console.log(`\n## ${title}`);
-    for (const value of values) console.log(`- ${value}`);
-  }
-  console.log(`\n## Test\n${prompt.test}`);
-  console.log(`\n## Fini quand\n${prompt.done}`);
-  console.log(`\n## Hors périmètre\n${prompt.out}`);
-  console.log(`\n## Commit\n${commitMessage(lot, step, prompt)}`);
+  const result = run(argv);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exitCode = result.exitCode;
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
