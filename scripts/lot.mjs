@@ -770,10 +770,13 @@ export function run(argv = [], env = {}) {
    * indisponible ou `--racine` refusée, donc `status = error`, où `null` veut dire « inconnue » et où Conductor ne lit pas la branche.
    */
   const settleCurrent = () => {
-    if (state.currentKnown || git === null) return;
+    if (state.currentKnown) return;
     state.currentKnown = true;
     try {
-      state.current = git.branch() || null;
+      // Avant la résolution de la racine (option inconnue, trop d'arguments) : le dépôt par défaut, sauf si `--racine` est
+      // donnée et pas encore validée (on ne lit jamais git dans un chemin non validé).
+      const source = git ?? (options.root === null ? (env.git ?? makeGit(repo)) : null);
+      state.current = source ? source.branch() || null : null;
     } catch {
       state.current = null;
     }

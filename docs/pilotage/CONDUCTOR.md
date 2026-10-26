@@ -139,6 +139,15 @@ branche du lot, la chercher ailleurs donnerait un faux « absent ».
   branche `conductor/agent-lot/<ID>` : jamais d'exécution sur HEAD détaché ni sur `main`. Sur la branche
   unique, l'ordre des prompts compte **tous** les prompts précédents du lot, quelle que soit la `Branche :`
   de leur étape dans le découpage (cette ligne décrit le dépôt manuel).
+- **Ce que Conductor lit (contrat v1.2 § 4)** : uniquement les champs structurés `status`, `exit_code`,
+  `lot`, `prompt`, `branch.current` et `action` ; **jamais le texte de `reason`** (informatif, libellé libre,
+  susceptible de changer : « HEAD détaché », « déjà committé »…). Garantie du producteur :
+  **`branch.current === null` si et seulement si `HEAD` est détaché**, pour tous les statuts (`blocked`,
+  `too_early`, `error` compris : la branche est lue même sur une sortie précoce d'usage ou de plan invalide).
+  Seule exception, sans effet pour Conductor : quand git est illisible ou que `--racine` est refusée, le statut
+  est `error` et `null` veut dire « inconnue ». `ready` et `action_required` portent toujours la branche
+  conforme (`conductor/agent-lot/<ID>` ou `lot/<ID>-<slug>`) ; `blocked` et `too_early` peuvent porter `null`
+  (le worktree de base est détaché).
 - **Historique** : un prompt `P<n>` exige que les prompts qui le précèdent dans le découpage, sur la même
   branche, soient déjà committés ; un prompt déjà committé est refusé (`blocked`). Hors Conductor,
   `--rejouer` reprend volontairement un prompt committé (il ne lève jamais l'ordre) ; l'option est interdite

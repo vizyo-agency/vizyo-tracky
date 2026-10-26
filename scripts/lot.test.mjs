@@ -1915,3 +1915,104 @@ test('identifiant : un plan à identifiant invalide est refusé par --check, san
   assert.equal(bad.exitCode, 2);
   assert.match(bad.stderr, /S2: identifiant invalide/);
 });
+
+// ── branch.current === null si et seulement si HEAD est détaché (contrat v1.2 § 4, m2) ──────────
+const EXIT_OF_STATUS = { ready: 0, error: 2, blocked: 3, too_early: 3, action_required: 4 };
+
+test('m2 : branch.current, status et exit_code sont cohérents dans TOUS les états (git réel)', () => {
+  const dependent = [lotFixture({ depends: ['T2.1'] }), lotFixture({ id: 'T2.1', asana_task_id: 'asana-t21', status: 'ready', execution: undefined, branch: undefined })];
+  const states = [
+    { name: 'ready, branche Conductor', lots: [lotFixture()], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P1'], expect: 'ready' },
+    { name: 'ready, branche manuelle', lots: [lotFixture()], branch: 'lot/T1.1-essai', args: ['T1.1', 'P2'], commits: [FIRST_SUBJECT], expect: 'ready' },
+    { name: 'action_required', lots: [actionLot()], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P1'], expect: 'action_required' },
+    { name: 'blocked, HEAD détaché', lots: [lotFixture()], branch: 'detached', args: ['T1.1', 'P1'], expect: 'blocked' },
+    { name: 'blocked, branche main', lots: [lotFixture()], branch: 'main', args: ['T1.1', 'P1'], expect: 'blocked' },
+    { name: 'blocked, branche d’un autre lot', lots: [lotFixture()], branch: 'conductor/agent-lot/T9.9', args: ['T1.1', 'P1'], expect: 'blocked' },
+    { name: 'blocked, ancien format conductor/<agent>/<exec>', lots: [lotFixture()], branch: 'conductor/agent/abc123', args: ['T1.1', 'P1'], expect: 'blocked' },
+    { name: 'blocked, ordre des prompts', lots: [lotFixture()], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P2'], expect: 'blocked' },
+    { name: 'blocked, déjà fait', lots: [lotFixture()], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P1'], commits: [FIRST_SUBJECT], expect: 'blocked' },
+    { name: 'blocked, dépendance ouverte (HEAD sur branche)', lots: dependent, branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P1'], expect: 'blocked' },
+    { name: 'blocked, dépendance ouverte (HEAD détaché)', lots: dependent, branch: 'detached', args: ['T1.1', 'P1'], expect: 'blocked' },
+    { name: 'blocked, statut backlog', lots: [lotFixture({ status: 'backlog' })], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P1'], expect: 'blocked' },
+    { name: 'blocked, clôture refusée', lots: [lotFixture()], branch: 'detached', args: ['T1.1', 'cloture'], expect: 'blocked' },
+    { name: 'too_early, sur branche', lots: [lotFixture({ status: 'waiting', not_before: '2999-01-01T00:00:00+01:00' })], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P1'], expect: 'too_early' },
+    { name: 'too_early, HEAD détaché', lots: [lotFixture({ status: 'waiting', not_before: '2999-01-01T00:00:00+01:00' })], branch: 'detached', args: ['T1.1', 'P1'], expect: 'too_early' },
+    { name: 'error, lot inconnu', lots: [lotFixture()], branch: 'conductor/agent-lot/T1.1', args: ['T9.9', 'P1'], expect: 'error' },
+    { name: 'error, lot inconnu (HEAD détaché)', lots: [lotFixture()], branch: 'detached', args: ['T9.9', 'P1'], expect: 'error' },
+    { name: 'error, identifiant invalide', lots: [lotFixture()], branch: 'conductor/agent-lot/T1.1', args: ['S2', 'P1'], expect: 'error' },
+    { name: 'error, prompt inconnu', lots: [lotFixture()], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P9'], expect: 'error' },
+    { name: 'error, prompt absent', lots: [lotFixture()], branch: 'conductor/agent-lot/T1.1', args: ['T1.1'], expect: 'error' },
+    { name: 'error, --rejouer', lots: [lotFixture()], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P1', '--rejouer'], expect: 'error' },
+    { name: 'error, option inconnue', lots: [lotFixture()], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P1', '--zzz'], expect: 'error' },
+    { name: 'error, option inconnue (HEAD détaché)', lots: [lotFixture()], branch: 'detached', args: ['T1.1', 'P1', '--zzz'], expect: 'error' },
+    { name: 'error, plan invalide', lots: [lotFixture({ done_when: [] })], branch: 'conductor/agent-lot/T1.1', args: ['T1.1', 'P1'], expect: 'error' },
+  ];
+  const seen = new Set();
+  for (const state of states) {
+    const dir = makeRepo({ lots: state.lots, branch: state.branch });
+    for (const subject of state.commits ?? []) commitFile(dir, `f-${Math.abs(subject.length)}.txt`, subject);
+    const head = gitIn(dir, 'branch', '--show-current'); // '' = HEAD détaché
+    const detached = head === '';
+    const result = cli(dir, [...state.args, '--conductor']);
+    const { json } = result;
+    assert.ok(json, `${state.name} : pas de ligne finale\n${result.stdout}${result.stderr}`);
+    assert.equal(json.status, state.expect, `${state.name} : ${json.reason}`);
+    seen.add(json.status);
+    // exit_code ↔ status ↔ code du processus.
+    assert.equal(json.exit_code, EXIT_OF_STATUS[json.status], state.name);
+    assert.equal(result.status, json.exit_code, state.name);
+    // LE contrat : current === null si et seulement si HEAD est détaché — quel que soit le statut.
+    assert.equal(json.branch.current === null, detached, `${state.name} : current=${JSON.stringify(json.branch.current)} détaché=${detached}`);
+    if (!detached) assert.equal(json.branch.current, head, state.name);
+    // ready et action_required n'existent que sur une branche conforme.
+    if (json.status === 'ready' || json.status === 'action_required') {
+      assert.ok(json.branch.current === 'conductor/agent-lot/T1.1' || /^lot\/T1\.1-/.test(json.branch.current), state.name);
+    }
+    // blocked/too_early sont les seuls statuts qui peuvent porter current = null (v1.1.1) ; error aussi quand git répond « détaché ».
+    if (json.branch.current === null) assert.ok(['blocked', 'too_early', 'error'].includes(json.status), state.name);
+    // La raison est informative : le test ne s'appuie pas dessus (m2), mais elle reste là pour l'humain.
+    if (json.status !== 'ready' && json.status !== 'action_required') assert.equal(typeof json.reason, 'string', state.name);
+  }
+  assert.deepEqual([...seen].sort(), ['action_required', 'blocked', 'error', 'ready', 'too_early']);
+});
+
+test('m2 : too_early depuis un HEAD détaché répond branch.current = null (et exit 3), avec une branche il répond la branche', () => {
+  const lots = [lotFixture({ status: 'waiting', not_before: '2999-01-01T00:00:00+01:00' })];
+  const detached = cli(makeRepo({ lots, branch: 'detached' }), ['T1.1', 'P1', '--conductor']);
+  assert.equal(detached.status, 3);
+  assert.equal(detached.json.status, 'too_early');
+  assert.equal(detached.json.branch.current, null);
+  const attached = cli(makeRepo({ lots, branch: 'conductor/agent-lot/T1.1' }), ['T1.1', 'P1', '--conductor']);
+  assert.equal(attached.json.status, 'too_early');
+  assert.equal(attached.json.branch.current, 'conductor/agent-lot/T1.1');
+  // En-process, avec un git injecté qui répond « détaché » (chaîne vide).
+  const injected = conductor(['T1.1', 'P1'], { lots, branch: '' });
+  assert.equal(injected.json.status, 'too_early');
+  assert.equal(injected.json.branch.current, null);
+});
+
+test('m2 : le contrat ne dépend pas du texte de reason — un HEAD détaché garde current = null quel que soit le libellé', () => {
+  const detached = conductor(['T1.1', 'P1'], { branch: '' });
+  assert.equal(detached.json.status, 'blocked');
+  assert.equal(detached.json.branch.current, null);
+  // Le libellé est informatif seulement ; on le remplace et on vérifie que les champs structurés ne bougent pas.
+  const { json } = detached;
+  const reworded = { ...json, reason: 'texte quelconque' };
+  assert.equal(reworded.branch.current, null);
+  assert.equal(reworded.status, 'blocked');
+  assert.equal(reworded.exit_code, 3);
+  // Une branche nommée comme le libellé n'est pas un HEAD détaché.
+  const odd = conductor(['T1.1', 'P1'], { branch: 'HEAD-détaché' });
+  assert.equal(odd.json.branch.current, 'HEAD-détaché');
+  assert.equal(odd.json.status, 'blocked');
+});
+
+test('m2 : git indisponible ou --racine refusée = error, branch.current null signifie alors « inconnue » (jamais lue par Conductor)', () => {
+  const noGit = conductor(['T1.1', 'P1'], { gitError: 'git cassé' });
+  assert.equal(noGit.json.status, 'error');
+  assert.equal(noGit.json.branch.current, null);
+  const refused = run(['T1.1', 'P1', '--conductor', '--racine', 'relatif'], fixtureEnv());
+  const json = JSON.parse(refused.stdout.trimEnd().split('\n').at(-1).slice('CONDUCTOR_RESULT '.length));
+  assert.equal(json.status, 'error');
+  assert.equal(json.branch.current, null);
+});
