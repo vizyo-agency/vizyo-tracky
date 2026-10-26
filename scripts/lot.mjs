@@ -200,6 +200,19 @@ export function remainingPrompts(decoupage, branch, done) {
   return remaining;
 }
 
+/**
+ * Règle de clôture d'un lot déjà `done` : le dernier prompt passe le lot à `done` dans le plan (S2.1 P3). La clôture
+ * reste donc possible si, et seulement si, la branche courante est celle du lot, que le lot a un découpage, et que TOUS
+ * les prompts de cette branche ont leur commit `[<ID>] P<n> — …` : le statut `done` vient alors de ces commits.
+ * Un lot `done` sans ces commits (fait avant le début des travaux) reste TERMINÉ.
+ */
+export function clotureAfterWork(lot, decoupage, branch, done) {
+  if (lot.status !== 'done' || !decoupage || !branch) return false;
+  if (lot.branch && branch !== lot.branch) return false;
+  const onBranch = decoupage.steps.filter((step) => !step.branch || step.branch === branch).flatMap((step) => step.prompts);
+  return onBranch.length > 0 && remainingPrompts(decoupage, branch, done).length === 0;
+}
+
 export function validatePlan(plan, options = {}) {
   const decoupeDir = options.decoupeDir ?? join(REPO, 'docs', 'pilotage', 'decoupe');
   const errors = [];
@@ -495,6 +508,9 @@ export function run(argv = [], env = {}) {
     const decoupagePath = join(decoupeDir, `${lot.id}.md`);
     const decoupage = existsSync(decoupagePath) ? parseDecoupage(readFileSync(decoupagePath, 'utf8')) : null;
     const wantsCloture = state.prompt === 'cloture';
+    if (!workflow.ready && wantsCloture && !conductorMode && g.subjects && clotureAfterWork(lot, decoupage, currentBranch, done)) {
+      workflow = { ready: true, reason: null, afterWork: true };
+    }
 
     const early = PROMPT_ID.test(state.prompt ?? '') ? findPrompt(decoupage, state.prompt) : null;
     if (early) state.commit = commitMessage(lot, early.step, early.prompt);
@@ -612,6 +628,7 @@ export function run(argv = [], env = {}) {
         io.log(`\n**${reason}**`);
         return finish('blocked', EXIT.BLOCKED, reason);
       }
+      if (workflow.afterWork) io.log(`\nLe plan marque ${lot.id} \`done\` : ce statut vient des commits de cette branche, la clôture reste autorisée.`);
       io.log('\n**PRÊTE** — lancer les contrôles, les deux relectures et la PR selon le skill.');
       return finish('ready', EXIT.READY);
     }

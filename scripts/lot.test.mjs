@@ -7,6 +7,7 @@ import {
   ACCEPTED_BRANCHES,
   EXIT,
   classifyBranch,
+  clotureAfterWork,
   commitMessage,
   completedPrompts,
   conductorGate,
@@ -338,6 +339,80 @@ test('commit_message est fourni dès que le prompt est connu, même bloqué', ()
   const { json } = conductor(['T1.1', 'P2'], { branch: 'main' });
   assert.equal(json.status, 'blocked');
   assert.equal(json.commit_message, '[T1.1] P2 — Deuxième prompt');
+});
+
+// ── Clôture : débloquée après le dernier prompt, jamais pour un lot déjà fini avant les travaux ──
+const ALL_THREE = [THIRD_SUBJECT, SECOND_SUBJECT, FIRST_SUBJECT];
+
+test('clôture : un lot passé à done par ses propres commits peut se clôturer', () => {
+  const done = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done' })], subjects: ALL_THREE });
+  assert.equal(done.exitCode, 0);
+  assert.match(done.stdout, /PRÊTE/);
+  assert.match(done.stdout, /vient des commits de cette branche/);
+  assert.ok(!done.stdout.includes('TERMINÉ'));
+});
+
+test('clôture : même résultat que pour un lot encore ready (le statut done ne change rien à l’éligibilité)', () => {
+  const ready = plain(['T1.1', 'cloture'], { subjects: ALL_THREE });
+  assert.equal(ready.exitCode, 0);
+  assert.match(ready.stdout, /PRÊTE/);
+});
+
+test('clôture : un lot done AVANT le début des travaux (aucun commit de prompt) reste TERMINÉ', () => {
+  const finished = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done' })], subjects: ['autre commit', 'docs: quelque chose'] });
+  assert.equal(finished.exitCode, 3);
+  assert.match(finished.stdout, /TERMINÉ/);
+});
+
+test('clôture : un lot done avec seulement une partie des prompts committés reste TERMINÉ', () => {
+  const partial = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done' })], subjects: [FIRST_SUBJECT, SECOND_SUBJECT] });
+  assert.equal(partial.exitCode, 3);
+  assert.match(partial.stdout, /TERMINÉ/);
+});
+
+test('clôture : done + tous les commits, mais mauvaise branche (main ou autre lot) = refusée', () => {
+  for (const branch of ['main', 'lot/T9.9-autre', '']) {
+    const wrong = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done' })], subjects: ALL_THREE, branch });
+    assert.equal(wrong.exitCode, 3, branch);
+    assert.match(wrong.stdout, /TERMINÉ/);
+  }
+});
+
+test('clôture : un lot done sans découpage ne se clôture pas (aucun commit pour prouver le travail)', () => {
+  const none = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done', execution: undefined })], decoupes: {}, subjects: ALL_THREE });
+  assert.equal(none.exitCode, 3);
+  assert.match(none.stdout, /TERMINÉ/);
+});
+
+test('clôture : un lot done reste non relançable pour un prompt, même avec des commits', () => {
+  const relance = plain(['T1.1', 'P1'], { lots: [lotFixture({ status: 'done' })], subjects: ALL_THREE });
+  assert.equal(relance.exitCode, 3);
+  assert.match(relance.stdout, /TERMINÉ/);
+});
+
+test('clôture : un lot ready à qui il reste des prompts est « PAS PRÊTE » (3)', () => {
+  const missing = plain(['T1.1', 'cloture'], { subjects: [SECOND_SUBJECT, FIRST_SUBJECT] });
+  assert.equal(missing.exitCode, 3);
+  assert.match(missing.stdout, /PAS PRÊTE — prompts sans commit : P3/);
+});
+
+test('clôture : refusée en mode Conductor même quand elle serait autorisée hors Conductor', () => {
+  const { json, exitCode } = conductor(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done' })], subjects: ALL_THREE, branch: 'lot/T1.1-essai' });
+  assert.equal(exitCode, 3);
+  assert.equal(json.status, 'blocked');
+});
+
+test('clôture : clotureAfterWork ne regarde que les prompts de la branche courante', () => {
+  const twoBranches = parseDecoupage(
+    decoupageText().replace('## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-essai', '## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-suite'),
+  );
+  const lot = lotFixture({ status: 'done' });
+  assert.equal(clotureAfterWork(lot, twoBranches, 'lot/T1.1-essai', new Set(['P1', 'P2'])), true);
+  assert.equal(clotureAfterWork({ ...lot, branch: 'lot/T1.1-suite' }, twoBranches, 'lot/T1.1-suite', new Set(['P3'])), true);
+  assert.equal(clotureAfterWork(lot, twoBranches, 'lot/T1.1-essai', new Set(['P1'])), false);
+  assert.equal(clotureAfterWork({ ...lot, status: 'ready' }, twoBranches, 'lot/T1.1-essai', new Set(['P1', 'P2'])), false);
+  assert.equal(clotureAfterWork(lot, twoBranches, '', new Set(['P1', 'P2'])), false);
+  assert.equal(clotureAfterWork(lot, null, 'lot/T1.1-essai', new Set()), false);
 });
 
 // ═════ Tests couplés au plan réel (remplacés par le commit « tests sur fixtures ») ═════
