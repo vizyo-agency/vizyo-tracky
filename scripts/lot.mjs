@@ -82,6 +82,45 @@ export function parseNotBefore(value) {
   return date;
 }
 
+/** Dernier dimanche du mois (0 = janvier) à 01:00 UTC : l'instant des changements d'heure européens. */
+function lastSundayAtOneUtc(year, month) {
+  const date = new Date(Date.UTC(year, month + 1, 0, 1));
+  date.setUTCDate(date.getUTCDate() - date.getUTCDay());
+  return date;
+}
+
+/**
+ * Décalage de l'heure de Paris à un instant, en minutes (60 l'hiver, 120 l'été) : règle européenne (dernier dimanche de
+ * mars à dernier dimanche d'octobre, 01:00 UTC). Calculé sans ICU, donc identique sur tous les postes.
+ */
+export function parisOffsetMinutes(instant) {
+  const year = instant.getUTCFullYear();
+  return instant >= lastSundayAtOneUtc(year, 2) && instant < lastSundayAtOneUtc(year, 9) ? 120 : 60;
+}
+
+/** L'instant en ISO 8601 à l'heure de Paris, avec son décalage correct (`2026-10-26T08:41:00+01:00`). */
+export function toParisIso(instant) {
+  const offset = parisOffsetMinutes(instant);
+  const local = new Date(instant.getTime() + offset * 60_000);
+  const fraction = local.getUTCMilliseconds() ? `.${String(local.getUTCMilliseconds()).padStart(3, '0')}` : '';
+  const clock = `${local.toISOString().slice(0, 19)}${fraction}`;
+  return `${clock}+${String(Math.floor(offset / 60)).padStart(2, '0')}:${String(offset % 60).padStart(2, '0')}`;
+}
+
+/**
+ * Un `not_before` écrit avec un décalage numérique doit porter celui de Paris À CET INSTANT (heure d'été +02:00, d'hiver
+ * +01:00) : `2026-07-01T08:41:00+01:00` serait 09:41 à Paris, pas 08:41. `Z` reste admis (UTC non ambigu). Rend l'erreur ou null.
+ */
+export function checkParisOffset(value) {
+  const written = /([+-])(\d{2}):(\d{2})$/.exec(String(value));
+  if (!written) return null;
+  const minutes = (written[1] === '-' ? -1 : 1) * (Number(written[2]) * 60 + Number(written[3]));
+  const expected = parisOffsetMinutes(parseNotBefore(value));
+  if (minutes === expected) return null;
+  const format = (total) => `${total < 0 ? '-' : '+'}${String(Math.floor(Math.abs(total) / 60)).padStart(2, '0')}:${String(Math.abs(total) % 60).padStart(2, '0')}`;
+  return `not_before « ${value} » : décalage ${format(minutes)} ≠ Europe/Paris à cette date (${format(expected)} attendu ; ou écrire l'heure en UTC avec Z)`;
+}
+
 export function dateGate(lot, now = new Date()) {
   if (!lot.not_before) return { ready: true, date: null };
   try {
@@ -408,6 +447,8 @@ export function validatePlan(plan, options = {}) {
     if (lot.not_before !== undefined) {
       try {
         parseNotBefore(lot.not_before);
+        const offsetError = checkParisOffset(lot.not_before);
+        if (offsetError) errors.push(`${lot.id}: ${offsetError}`);
       } catch (error) {
         errors.push(`${lot.id}: ${error.message}`);
       }
@@ -451,6 +492,8 @@ export function validatePlan(plan, options = {}) {
       if (action.not_before !== undefined) {
         try {
           parseNotBefore(action.not_before);
+          const offsetError = checkParisOffset(action.not_before);
+          if (offsetError) errors.push(`${lot.id}: action ${name} ${offsetError}`);
         } catch (error) {
           errors.push(`${lot.id}: action ${name} ${error.message}`);
         }
@@ -617,8 +660,18 @@ export function actionPayload(lot, action) {
     evidence_path: action.output,
     evidence_rule: EVIDENCE_RULE,
     resume_command: `/lot ${lot.id} ${action.resume_prompt}`,
-    not_before: action.not_before ?? lot.not_before ?? null,
+    not_before: notBeforeIso(action.not_before ?? lot.not_before ?? null),
   };
+}
+
+/** `not_before` en ISO 8601 à l'heure de Paris, décalage de saison correct ; `null` si absent ; la valeur brute si elle est illisible (le plan est alors déjà refusé). */
+function notBeforeIso(value) {
+  if (value === null || value === undefined) return null;
+  try {
+    return toParisIso(parseNotBefore(value));
+  } catch {
+    return value;
+  }
 }
 
 export function conductorLine(result) {

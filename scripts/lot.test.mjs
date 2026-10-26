@@ -12,6 +12,7 @@ import {
   LOT_ID,
   acceptedBranches,
   actionPayload,
+  checkParisOffset,
   classifyBranch,
   classifySubject,
   clotureAfterWork,
@@ -26,12 +27,14 @@ import {
   inspectEvidence,
   loadPlan,
   lotMap,
+  parisOffsetMinutes,
   parseDecoupage,
   parseNotBefore,
   promptsBefore,
   run,
   scrubLocalPaths,
   statusGate,
+  toParisIso,
   validatePlan,
   validateRelativePath,
 } from './lot.mjs';
@@ -2015,4 +2018,142 @@ test('m2 : git indisponible ou --racine refusée = error, branch.current null si
   const json = JSON.parse(refused.stdout.trimEnd().split('\n').at(-1).slice('CONDUCTOR_RESULT '.length));
   assert.equal(json.status, 'error');
   assert.equal(json.branch.current, null);
+});
+
+// ── Échéance de la tâche (m15) : not_before ISO avec le décalage de Paris, heure d'été/hiver (contrat v1.2 § 5) ──
+const PARIS_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2}$/;
+
+/** Le décalage de Paris selon ICU (référence indépendante de la règle codée dans lot.mjs), en minutes ; null si ICU ne sait pas. */
+function icuParisOffset(instant) {
+  try {
+    const part = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Paris', timeZoneName: 'longOffset' }).formatToParts(instant).find((item) => item.type === 'timeZoneName')?.value;
+    const match = /^GMT([+-])(\d{2}):(\d{2})$/.exec(part ?? '');
+    return match ? (match[1] === '-' ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3])) : null;
+  } catch {
+    return null;
+  }
+}
+
+test('m15 : parisOffsetMinutes — bornes exactes des changements d’heure 2026', () => {
+  assert.equal(parisOffsetMinutes(new Date('2026-03-29T00:59:59Z')), 60);
+  assert.equal(parisOffsetMinutes(new Date('2026-03-29T01:00:00Z')), 120);
+  assert.equal(parisOffsetMinutes(new Date('2026-10-25T00:59:59Z')), 120);
+  assert.equal(parisOffsetMinutes(new Date('2026-10-25T01:00:00Z')), 60);
+  assert.equal(parisOffsetMinutes(new Date('2026-10-26T07:41:00Z')), 60, 'le lundi 26/10/2026 Paris est à l’heure d’hiver');
+  assert.equal(parisOffsetMinutes(new Date('2026-07-01T00:00:00Z')), 120);
+  assert.equal(parisOffsetMinutes(new Date('2026-01-15T12:00:00Z')), 60);
+});
+
+test('m15 : parisOffsetMinutes = ICU Europe/Paris, toutes les 15 minutes autour de chaque changement d’heure 2024-2032 et chaque jour', (t) => {
+  if (icuParisOffset(new Date('2026-07-01T00:00:00Z')) === null) {
+    t.skip('ICU sans longOffset');
+    return;
+  }
+  const lastSunday = (year, month) => {
+    const date = new Date(Date.UTC(year, month + 1, 0, 1));
+    date.setUTCDate(date.getUTCDate() - date.getUTCDay());
+    return date.getTime();
+  };
+  let checked = 0;
+  for (let year = 2024; year <= 2032; year += 1) {
+    for (const month of [2, 9]) {
+      const edge = lastSunday(year, month);
+      for (let step = -24; step <= 24; step += 1) {
+        const instant = new Date(edge + step * 15 * 60_000);
+        assert.equal(parisOffsetMinutes(instant), icuParisOffset(instant), instant.toISOString());
+        checked += 1;
+      }
+    }
+    for (let day = 0; day < 366; day += 1) {
+      const instant = new Date(Date.UTC(year, 0, 1, 12) + day * 86_400_000);
+      assert.equal(parisOffsetMinutes(instant), icuParisOffset(instant), instant.toISOString());
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 3000);
+});
+
+test('m15 : toParisIso — ISO à l’heure de Paris, décalage de saison correct, même instant', () => {
+  const cases = [
+    ['2026-10-26T07:41:00Z', '2026-10-26T08:41:00+01:00'],
+    ['2026-07-01T06:41:00Z', '2026-07-01T08:41:00+02:00'],
+    ['2026-03-29T00:59:00Z', '2026-03-29T01:59:00+01:00'],
+    ['2026-03-29T01:00:00Z', '2026-03-29T03:00:00+02:00'],
+    ['2026-10-25T00:30:00Z', '2026-10-25T02:30:00+02:00'],
+    ['2026-10-25T01:30:00Z', '2026-10-25T02:30:00+01:00'],
+    ['2026-10-26T22:59:00Z', '2026-10-26T23:59:00+01:00'],
+    ['2026-06-30T22:30:00Z', '2026-07-01T00:30:00+02:00'],
+    ['2026-10-26T07:41:00.250Z', '2026-10-26T08:41:00.250+01:00'],
+  ];
+  for (const [utc, paris] of cases) {
+    const instant = new Date(utc);
+    assert.equal(toParisIso(instant), paris, utc);
+    assert.match(toParisIso(instant), PARIS_ISO);
+    assert.equal(parseNotBefore(toParisIso(instant)).getTime(), instant.getTime(), 'même instant');
+  }
+});
+
+test('m15 : un not_before au décalage de saison faux est refusé par le plan (--check), un correct ou en Z est accepté', () => {
+  const decoupeDir = join(fixtureEnv().repo, 'decoupe');
+  const check = (notBefore) => validatePlan({ statuses: STATUSES, lots: [lotFixture({ status: 'waiting', not_before: notBefore })] }, { decoupeDir });
+  for (const good of ['2026-10-26T08:41:00+01:00', '2026-07-01T08:41:00+02:00', '2026-07-01T06:41:00Z', '2026-01-15T09:00+01:00', '2026-03-29T03:00:00+02:00', '2026-10-25T02:30:00+02:00', '2026-10-25T02:30:00+01:00']) {
+    assert.deepEqual(check(good), [], good);
+  }
+  const bad = {
+    '2026-07-01T08:41:00+01:00': /\+01:00 ≠ Europe\/Paris à cette date \(\+02:00 attendu/,
+    '2026-10-26T08:41:00+02:00': /\+02:00 ≠ Europe\/Paris à cette date \(\+01:00 attendu/,
+    '2026-03-29T02:30:00+01:00': /\+01:00 ≠ Europe\/Paris/, // heure locale qui n'existe pas (saut de 02:00 à 03:00)
+    '2026-10-26T08:41:00+00:00': /\+00:00 ≠ Europe\/Paris/,
+    '2026-10-26T08:41:00-05:00': /-05:00 ≠ Europe\/Paris/,
+    '2026-10-26T08:41:00+05:30': /\+05:30 ≠ Europe\/Paris/,
+  };
+  for (const [value, pattern] of Object.entries(bad)) {
+    const errors = check(value);
+    assert.equal(errors.length, 1, `${value} : ${errors.join(' | ')}`);
+    assert.match(errors[0], pattern, value);
+    assert.match(errors[0], /^T1\.1: not_before « /);
+  }
+  // Même règle pour le not_before d'une action.
+  const actionErrors = validatePlan({ statuses: STATUSES, lots: [actionLot({ execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [{ ...ACTION, not_before: '2026-07-01T08:41:00+01:00' }] } })] }, { decoupeDir: join(fixtureEnv().repo, 'decoupe') });
+  assert.ok(actionErrors.some((message) => /^T1\.1: action T1\.1-A1 not_before « 2026-07-01T08:41:00\+01:00 » : décalage \+01:00 ≠ Europe\/Paris/.test(message)), actionErrors.join(' | '));
+});
+
+test('m15 : le plan réel — chaque not_before (lot et action) est ISO avec le décalage de Paris correct', () => {
+  const plan = loadPlan();
+  const values = [];
+  for (const lot of plan.lots) {
+    if (lot.not_before !== undefined) values.push([lot.id, lot.not_before]);
+    for (const action of lot.execution?.actions ?? []) if (action.not_before !== undefined) values.push([`${lot.id} ${action.id}`, action.not_before]);
+  }
+  assert.ok(values.length >= 1, 'le plan réel porte au moins le verrou S2.1');
+  for (const [where, value] of values) {
+    assert.match(value, PARIS_ISO, where);
+    assert.equal(checkParisOffset(value), null, `${where} : ${value}`);
+    assert.equal(toParisIso(parseNotBefore(value)), value, `${where} : forme canonique`);
+    if (icuParisOffset(parseNotBefore(value)) !== null) {
+      const written = /([+-])(\d{2}):(\d{2})$/.exec(value);
+      assert.equal((written[1] === '-' ? -1 : 1) * (Number(written[2]) * 60 + Number(written[3])), icuParisOffset(parseNotBefore(value)), `${where} : ICU`);
+    }
+  }
+});
+
+test('m15 : action.not_before — ISO avec décalage de Paris, canonique, valeur du lot en repli ; le jour de Paris se lit sur les 10 premiers caractères', () => {
+  // Le vrai plan : S2.1-A1, verrou du lundi 26/10/2026 à 08:41 Paris (heure d'hiver).
+  const real = run(['S2.1', 'P1', '--conductor'], { git: { branch: () => 'conductor/agent-lot/S2.1', subjects: () => [] }, now: new Date('2026-10-26T08:00:00Z') });
+  const line = real.stdout.trimEnd().split('\n').at(-1);
+  const json = JSON.parse(line.slice('CONDUCTOR_RESULT '.length));
+  assert.equal(json.status, 'action_required', json.reason);
+  assert.equal(json.action.not_before, '2026-10-26T08:41:00+01:00');
+  assert.match(json.action.not_before, PARIS_ISO);
+  assert.deepEqual(Object.keys(json.action), ['id', 'type', 'responsible', 'url', 'instructions', 'forbidden', 'evidence_path', 'evidence_rule', 'resume_command', 'not_before'], 'aucun champ ajouté');
+  assert.equal(parseNotBefore(json.action.not_before).toISOString(), '2026-10-26T07:41:00.000Z');
+  // Variantes : une valeur en Z est ramenée à l'heure de Paris ; sans valeur d'action, celle du lot sert de repli ; sans rien, null.
+  const payload = (lotOverrides, actionOverrides) => actionPayload(actionLot(lotOverrides), { ...ACTION, ...actionOverrides });
+  assert.equal(payload({ not_before: undefined }, { not_before: '2026-07-01T06:41:00Z' }).not_before, '2026-07-01T08:41:00+02:00');
+  assert.equal(payload({ not_before: '2026-10-26T08:41:00+01:00' }, {}).not_before, '2026-10-26T08:41:00+01:00', 'repli sur le lot');
+  assert.equal(payload({ not_before: undefined }, {}).not_before, null);
+  // Le jour (date sans heure, Europe/Paris) que le consommateur donne à l'échéance de la note-tâche = les 10 premiers caractères.
+  for (const [value, day] of [['2026-10-26T08:41:00+01:00', '2026-10-26'], ['2026-07-01T00:30:00+02:00', '2026-07-01'], ['2026-10-26T23:59:00+01:00', '2026-10-26'], ['2026-06-30T22:30:00Z', '2026-07-01']]) {
+    assert.equal(payload({ not_before: undefined }, { not_before: value }).not_before.slice(0, 10), day, value);
+  }
 });

@@ -58,6 +58,8 @@ Dans Conductor :
 
 - demander une tâche humaine durable dans Notes/Tâches, distincte de la file des validations Git ;
 - mettre le run en attente d'action sans commit vide et sans le classer en échec ;
+- fixer l'échéance de la note-tâche au **jour** (Europe/Paris) de `action.not_before` et écrire l'heure exacte
+  dans le corps (« Pas avant 08:41 Europe/Paris ») : la tâche n'est jamais « due » à l'instant `not_before` ;
 - ne jamais demander qu'un cookie, jeton, mot de passe ou valeur de secret soit copié dans GitHub ;
 - après la preuve attendue, relancer le prompt indiqué ; `/lot` vérifiera le fichier avant de l'autoriser.
   La preuve doit se trouver sur la branche de l'exécution (`conductor/agent-lot/<ID>`) ; comment elle y

@@ -210,6 +210,17 @@ ce libellé. La tâche contient :
 - fichier ou signal attendu ;
 - commande exacte de reprise.
 
+**Échéance de la note-tâche (contrat v1.2 § 5).** Aucun champ de plus dans `CONDUCTOR_RESULT` :
+`action.not_before` est la seule information de date. Côté Conductor, l'échéance de la note-tâche est le
+**jour** (date sans heure, fuseau Europe/Paris) de `action.not_before`, c'est-à-dire ses 10 premiers
+caractères ; l'**heure exacte** va dans le corps de la tâche (« Pas avant 08:41 Europe/Paris »). L'échéance ne
+doit jamais prétendre que la tâche est due à l'instant `not_before` : une tâche dont l'échéance tombe le
+26/10 n'est pas due à 08:41 pile, elle est seulement à surveiller ce jour-là. `lot.mjs` garantit la forme :
+`action.not_before` est une date ISO 8601 à l'heure de Paris avec son décalage de saison correct (`+01:00`
+l'hiver, `+02:00` l'été : le lundi 26/10/2026 est à l'heure d'hiver, le changement d'heure a eu lieu le
+25/10), sous la forme `AAAA-MM-JJTHH:MM:SS±HH:MM`. Une valeur écrite en `Z` dans le plan est ramenée à
+l'heure de Paris ; `--check` refuse un décalage qui n'est pas celui de Paris à cette date (`2026-07-01T08:41:00+01:00`).
+
 La clôture de la tâche ne doit pas relancer tout le lot. Elle relance uniquement le prompt indiqué,
 sur la même branche. La première application est `S2.1-A1` : ouvrir Search Console dans un Chrome déjà
 connecté, relever les indicateurs de la baseline sans action Google, déposer
