@@ -316,6 +316,26 @@ dépôt (un essai à blanc le dira).
 levée par Conductor : l'humain relance le prompt après avoir vérifié que `lot.mjs` voit le fichier
 (`node scripts/lot.mjs S2.1 P1 --conductor` dans le worktree de la branche `conductor/agent-lot/S2.1`).
 
+## Exploitation : ce que le 26/10 a appris
+
+- **Un profil par type de lot.** L'emploi Agent Lot n'écrit que là où son profil le permet. Pour un lot de landing, on élargit à `lp/**`
+  (et aux commandes `node lp/build.mjs` et `node lp/verify-links.mjs`) ; pour un lot documentaire, à `docs/marketing/seo/veille/**`,
+  `docs/marketing/seo/geo/**` et `docs/marketing/ads/**`. Le réglage se pose en SQL sur l'instance (pas d'écran) et **on remet le
+  profil pilote à la fin** : `docs/marketing/seo/veille/**` seul, commande `node scripts/lot.mjs *`.
+- **Approuver le push d'un prompt AVANT de lancer le suivant.** Le push approuvé après coup échoue en « push périmé » (la tête de la
+  branche a avancé). Si le prompt suivant est déjà fait, approuver seulement le dernier push (il contient les commits précédents) et
+  refuser les anciens avec le motif « correcte, mais pas maintenant » : ce motif n'abaisse pas la fiabilité de l'emploi, les autres si.
+- **Un refus compte comme un échec de l'agent** (fiabilité de l'emploi). Un prompt ambigu se corrige dans le découpage, pas contre l'agent.
+- **Branche en retard.** Si `docs/pilotage/**` change sur `main` pendant qu'un lot est en cours, Conductor répond « branche en retard » et
+  n'avance pas seul : fusionner `origin/main` dans le worktree du lot avec le message exact `merge(<ID>): main`, puis relancer.
+- **Le plafond quotidien est partagé** par tous les projets de l'instance (Nisiv, FOODSQAN, Tracky…) : il s'est atteint le 26/10 à 10 $.
+  Écran *Coûts* → « Lever le blocage jusqu'à minuit », avec un motif écrit qui va au journal d'audit ; le plafond revient seul à minuit
+  (Paris).
+- **Un push approuvé part pour de vrai**, même quand le projet est en simulation forcée.
+- **L'agent n'a ni `tsc` ni `eslint` ni `mkdir` ni `echo`** : ses essais sont refusés sans conséquence ; la consigne générique les
+  cite encore. Il n'a pas non plus Lighthouse : toute mesure de performance est faite par un humain avant et après (voir `controle-s2.11.md`).
+- **Un build qui salit l'arbre bloque le lot** (« arbre sale ») : `lp/build.mjs` ne redate plus que les pages réellement modifiées (PR n° 146).
+
 ## Dépôt public : politique des pilotes
 
 Le dépôt cible est **public** : tout ce qui est poussé est lisible par tous, et ce que l'agent peut lire
