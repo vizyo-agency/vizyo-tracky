@@ -1,9 +1,16 @@
 # Tracky — consignes de dépôt
 
-## Pilotage par lots — la porte d'entrée de tout nouveau travail
+## Travail par lots Asana (`/lot`) — périmètre de cette section
 
-Le dépôt est la source de vérité du chantier ; Asana en est le miroir lisible. Avant de coder,
-chercher l'identifiant stable du lot dans `docs/pilotage/PLAN.md`, puis lancer :
+Cette section ne vaut que pour le travail **demandé comme un lot** : un identifiant stable (`S2.2`,
+`C8.4`…) de `docs/pilotage/plan.json`, dont Asana est le miroir lisible. Sans lot, elle ne s'applique
+pas et rien ne change : les audits quotidiens (`docs(vps-audit)`, `docs(centre-alerte)`), les correctifs
+`fix/` et les fonctionnalités `feat/` hors plan n'en dépendent pas, et le déploiement comme toutes les
+règles ci-dessous gardent leur force. Si une tâche n'a pas de lot, ne pas en inventer un : suivre
+« Le dépôt est PARTAGÉ » et les consignes propres à la tâche.
+
+Pour un lot, le dépôt est la source de vérité. Avant de coder, chercher l'identifiant dans
+`docs/pilotage/PLAN.md`, puis lancer :
 
 ```text
 /lot <ID> P<n>       # un prompt ciblé, un test ciblé, un commit
@@ -15,18 +22,19 @@ dans `docs/pilotage/decoupe/<ID>.md` avant de commencer. `node scripts/lot.mjs <
 brief, ses dépendances et son état. Une dépendance ouverte arrête le travail : on ne reconstruit pas
 provisoirement ce qu'elle doit livrer.
 
-Règles non négociables :
+Règles du travail par lots :
 
 - un worktree par branche ; ne jamais changer de branche dans un dossier partagé ;
 - un prompt de 15 à 30 minutes, cinq fichiers environ, un test ciblé et un commit au message affiché ;
 - aucune suite complète, aucune PR et aucune relecture pendant les prompts ; ces gestes arrivent une
   seule fois à la clôture ;
-- `main` ne reçoit pas de commit direct de développement : une branche `lot/<ID>-<slug>` et une PR ;
+- un lot se code sur sa propre branche (`lot/<ID>-<slug>`, ou `conductor/<agent>/<exec>` fournie par
+  Conductor) et arrive sur `main` par PR, jamais par un commit direct de développement ;
 - dans Vizyo Conductor, Agent Lot ne pousse jamais lui-même ; tout prompt découpé peut travailler dans
   le dépôt, tandis qu'un navigateur authentifié, un secret manquant, une décision, une communication
   externe ou un déploiement produit une `ACTION HUMAINE REQUISE` puis une reprise explicite ;
-- le statut, les dépendances et les critères viennent de `docs/pilotage/plan.json`. Une modification
-  faite uniquement dans Asana sera écrasée ou deviendra incohérente.
+- le statut, les dépendances et les critères d'un lot viennent de `docs/pilotage/plan.json`. Une
+  modification faite uniquement dans Asana sera écrasée ou deviendra incohérente.
 
 Le mode d'emploi complet est dans [`docs/pilotage/GUIDE.md`](./docs/pilotage/GUIDE.md) et les règles
 de l'orchestrateur dans [`docs/pilotage/CONDUCTOR.md`](./docs/pilotage/CONDUCTOR.md).
