@@ -7,7 +7,7 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 | Ordre | Lot | État | Commande | Résultat attendu |
 |---:|---|---|---|---|
 | 1 | **S2.1** Relevé Google J+4 | **fait le 26/10** — classement A : aucune des 5 pages prioritaires recrawlée après le déploiement, sitemap relu le 24/10 | — | comparaison honnête avec la baseline du 22/10, sans action Google |
-| 2 | **S2.2** Corrections courtes du site | prêt (S2.1 clos) | `/lot S2.2 P1` | tarif périmé retiré, FAQ visible = JSON-LD, bons liens de footer, nouvelle baseline |
+| 2 | **S2.2** Corrections courtes du site | **fait le 26/10** — déployé (PR n° 148, marketing-seul) | — | tarif périmé retiré, FAQ visible = JSON-LD, bons liens de footer ; baseline datée dans `docs/marketing/seo/corrections-2026-10/controle-s2.2.md` |
 | 3 | **S2.11** Snippets, PDF et performance | partiel | `/lot S2.11` après redécoupage | finir ce que le sprint du 22/10 n'a pas traité |
 | 4 | **S2.12** Douze villes restantes | décision après mesure | `/lot S2.12` après arbitrage | enrichir, regrouper ou noindexer — jamais douze textes artificiels |
 | 5 | **S2.13** E-E-A-T | backlog | `/lot S2.13` | preuves publiques réelles, aucune preuve fabriquée |
@@ -27,7 +27,7 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 
 ### S2 — SEO et site
 
-`S2.1` relevé J+4 (fait) · `S2.2` corrections courtes · `S2.3` pack visuel · `S2.4` vidéos ·
+`S2.1` relevé J+4 (fait) · `S2.2` corrections courtes (fait) · `S2.3` pack visuel · `S2.4` vidéos ·
 `S2.5` plan de contenus · `S2.6` pages métier · `S2.7` audit d’un concurrent local · `S2.8` landing Toulouse
 (fait) · `S2.9` maillage et entités (fait) · `S2.10` hub Occitanie (fait) · `S2.11` snippets/PDF/perf
 (partiel) · `S2.12` pages locales (Toulouse faite, 12 restantes) · `S2.13` E-E-A-T.
