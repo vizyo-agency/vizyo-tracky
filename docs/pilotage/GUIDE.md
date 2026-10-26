@@ -26,8 +26,10 @@ Une carte exécutable porte toujours :
 - les sources à lire et ce qui est hors périmètre.
 
 Les statuts du dépôt sont : `done`, `partial`, `ready`, `waiting`, `decision`, `backlog`.
-`ready` signifie que toutes les dépendances sont closes. `waiting` signifie qu'il faut attendre une
-date ou un signal extérieur. `decision` exige une réponse de Youness avant tout code.
+`ready` signifie que le lot est prêt hors dépendances : une dépendance ouverte le bloque dans tous les
+cas, quel que soit son statut, et `/lot` s'arrête (un lot `ready` peut donc dépendre d'un lot encore
+ouvert ; il part quand celui-ci est `done`). `waiting` signifie qu'il faut attendre une date ou un
+signal extérieur. `decision` exige une réponse de Youness avant tout code.
 
 ## 3. La commande `/lot`
 

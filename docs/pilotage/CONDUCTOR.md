@@ -3,72 +3,116 @@
 > Conductor exécute le travail de dépôt et orchestre les interruptions. Une action humaine n'est ni
 > un échec, ni une validation Git : elle a sa propre tâche, sa preuve attendue et son point de reprise.
 
-## État réel au 25/10/2026
+Étiquettes : **OBSERVÉ** (constaté, avec sa date), **INFÉRÉ** (déduit), **À VÉRIFIER SUR L'INSTANCE**
+(seule l'instance Conductor le sait ; ce dépôt ne peut ni le prouver ni l'affirmer).
 
-- Projet : `Tracky` — `https://dev.conductor.vizyoagency.com/projects/tracky`
-- Dépôt déclaré : `vizyoagency-create/vizyo-tracky@main`
-- Propriétaire GitHub actuel : compte personnel `vizyoagency-create`
-- Organisation GitHub : `vizyo-agency` ; elle contient `nisiv`, `vizyo-conductor` et `dispocar`, pas Tracky
-- App GitHub : `Vizyo Conductor`, privée et installée uniquement sur `vizyo-agency`
-- Branche de pilotage : `chore/tracky-lot-pilotage`
-- PR de pilotage : `https://github.com/vizyoagency-create/vizyo-tracky/pull/139`, ouverte et non fusionnée
-- Workspace Tracky : bloqué ; Conductor ne peut ni cloner avec son App ni vérifier `main`
-- Stack : Angular · Node.js · PostgreSQL · Docker ; fuseau Europe/Paris
-- Équipe : Reviewer et Task Manager, plannings en pause
-- Coffre Tracky : aucun secret propre au projet ; les secrets de plateforme restent hérités
+## État au 26/10/2026
+
+- Dépôt : `vizyo-agency/vizyo-tracky`, public, branche de base `main`. Le dépôt a été transféré depuis
+  un compte personnel ; l'ancienne adresse redirige. OBSERVÉ le 26/10.
+- `main` est protégée : une approbation est requise avant fusion et aucun contrôle automatique n'est
+  exigé par la protection. Le dépôt n'avait aucun workflow au 25/10 ; la CI minimale du pilotage est
+  décrite dans `.github/workflows/pilotage.yml` (non exigée). OBSERVÉ le 26/10.
+- Branche de pilotage : `chore/tracky-lot-pilotage` ; PR de pilotage : n° 139. Sa fusion est une décision
+  humaine séparée (lot C8.2).
+- Projet Conductor `tracky`, agent `agent-lot`, fuseau Europe/Paris, pile Angular · Node.js ·
+  PostgreSQL · Docker.
+- **À vérifier sur l'instance** : que l'App GitHub « Vizyo Conductor » est installée sur ce dépôt, l'état
+  du workspace du projet (clone possible, protection de `main` lisible), l'équipe embauchée et ses
+  plannings, la configuration réelle de l'emploi Agent Lot (grade, modèle, essai, parallélisme).
+- Coffre Tracky : aucun secret propre au projet n'est documenté ici ; les secrets de plateforme restent
+  hérités.
 
 Le dépôt Tracky est public, mais Agent Lot a quand même besoin d'une installation GitHub App pour
 les jetons d'installation, les écritures, les protections de branche et les webhooks. Un clone public
 anonyme ne suffit pas au workflow.
 
-## Décision GitHub à prendre sans précipitation
-
-L'App est privée. GitHub autorise alors son installation uniquement sur le compte qui la possède,
-ici `vizyo-agency`. Deux chemins existent :
-
-1. **Transférer Tracky vers `vizyo-agency`** — cohérent avec NISIV, Dispocar et Conductor. GitHub
-   conserve commits, branches, PR, issues, secrets, deploy keys et webhooks, et redirige l'ancienne
-   URL. Il faut toutefois auditer protections, Actions, Pages/packages, intégrations externes,
-   remotes des worktrees et scripts qui contiennent l'ancien owner avant le transfert.
-2. **Rendre l'App publique, puis l'installer sur `vizyoagency-create` avec Tracky seulement** — ne
-   déplace aucun dépôt, mais rend l'App installable par d'autres comptes. Une App publique installée
-   ailleurs ne peut pas redevenir privée tant que ces installations existent.
-
-Audit de transfert du 25/10 : aucune GitHub Action, aucun webhook, secret/variable Actions,
-environnement, Pages, release ou issue ouverte ; une PR ouverte (#139) ; une deploy key d'écriture
-`tracky-deploy@srv1201617` ; dix worktrees locaux qui partagent le même remote ; aucune référence
-opérationnelle à l'ancien owner hors du présent pilotage. Les références historiques à d'anciennes
-PR restent valides grâce aux redirections et ne doivent pas être réécrites. `main` n'est pas protégée.
-
-Ne créer ni second dépôt ni miroir : ils diviseraient les branches et les PR. Ne changer aucun
-remote avant la décision. Vu cet audit, le transfert vers `vizyo-agency` est recommandé : il aligne
-Tracky sur les trois autres projets Conductor avec peu de surface de migration. Après transfert :
-
-1. ajouter Tracky au périmètre de l'installation existante de l'App ;
-2. protéger `main` avec passage par PR, sans inventer de contrôle CI inexistant ;
-3. mettre à jour le remote partagé puis les réglages du projet Conductor ;
-4. vérifier la deploy key, le clone, la protection et la PR #139 ;
-5. ne fusionner et ne déployer qu'après une décision séparée.
+Historique daté : le 25/10 le dépôt appartenait à un compte personnel alors que l'App privée ne
+s'installe que sur l'organisation ; le transfert vers l'organisation a depuis été fait. Aucune
+référence à l'ancien propriétaire n'est à réécrire : les liens d'anciennes PR sont redirigés.
 
 ## Configuration cible d'Agent Lot
 
 - grade Senior ; Claude Sonnet 5 ; période d'essai de 10 exécutions ;
 - seuil hérité de 70 % ; parallélisme 1 ;
 - déclencheur manuel uniquement ; aucun planning et aucun webhook GitHub ;
-- un worktree isolé par run ; branche `lot/<ID>-<slug>` ;
-- Agent Lot committe mais ne pousse pas ; Conductor propose le push dans Validations ;
+- un worktree isolé par branche ; branche `conductor/<agent>/<exec>` fournie par Conductor ou
+  `lot/<ID>-<slug>` ;
+- Agent Lot committe mais ne pousse jamais et n'ouvre pas de PR ; Conductor propose le push dans
+  Validations ; la PR, la fusion et le déploiement sont des gestes séparés, chacun avec sa décision ;
 - Reviewer relit la PR ; Merger peut préparer une fusion séparée si cet agent est ensuite embauché ;
 - aucun déploiement ne découle d'un push ou d'une fusion : il exige son propre geste autorisé.
 
+Ces valeurs sont la cible ; leur état réel est **à vérifier sur l'instance**.
+
 La limitation initiale à `S2.2 P1`–`P4` n'était pas liée au risque du dev. S2.2 était simplement le
 seul lot prêt, découpé et décrit pour Agent Lot. Désormais, tout prompt existant dans un découpage
-est candidat ; statut, date, dépendances, branche et actions humaines continuent de bloquer.
+est candidat ; statut, date, dépendances, branche, ordre des prompts et actions humaines continuent
+de bloquer.
+
+## Contrat `lot.mjs --conductor` ↔ Conductor (v1)
+
+Invocation, depuis la racine du **worktree de la branche du lot** (jamais depuis le worktree de base
+détaché, qui n'a ni la branche ni les preuves) :
+
+```text
+node scripts/lot.mjs <LOT_ID> <PROMPT_ID> --conductor     # PROMPT_ID = P1 … P999
+```
+
+`cloture` n'est jamais accepté en mode Conductor. La sortie reste lisible par un humain ; la **dernière
+ligne de stdout**, toujours, est `CONDUCTOR_RESULT <json compact>` :
+
+```json
+{"version":1,"status":"ready","exit_code":0,"lot":"S2.1","prompt":"P1","reason":null,
+ "branch":{"current":"conductor/agent-lot/abc123","accepted":["conductor/<agent>/<exec>","lot/<ID>-<slug>"]},
+ "action":null,"commit_message":"[S2.1] P1 — Titre du prompt"}
+```
+
+| Code | `status` | Sens |
+|---:|---|---|
+| 0 | `ready` | Le prompt peut être exécuté. |
+| 2 | `error` | Usage ou erreur interne : arguments, prompt inconnu, plan ou découpage illisible, date invalide, git indisponible. |
+| 3 | `blocked` / `too_early` | Non prêt : statut, dépendance ouverte, prompt déjà fait, ordre des prompts, branche non conforme, lot non découpé, clôture demandée. `too_early` : la date minimale n'est pas atteinte. |
+| 4 | `action_required` | Action humaine requise : ni échec, ni validation de code. |
+
+`exit_code` du JSON = code de sortie du processus. Hors `--conductor`, la ligne n'est pas émise et les
+codes historiques restent inchangés (0 prêt, 2 usage, 3 non prêt).
+
+Ordre des portes en mode Conductor : usage et plan → statut/date/dépendances → clôture refusée →
+prompt connu et autorisé (`execution.prompts`) → **branche** → prompt déjà committé → ordre des prompts →
+**action humaine** → `ready`. La branche passe avant la preuve : la preuve vit dans le worktree de la
+branche du lot, la chercher ailleurs donnerait un faux « absent ».
+
+- **Branche** : `conductor/<agent>/<exec>` (préfixe natif de Conductor) ou `lot/<ID>-<slug>` du même
+  lot (exactement celle du plan si elle y est déclarée). HEAD détaché, `main` et les branches
+  d'intégration donnent `blocked`, avec `branch.current = null` pour un HEAD détaché et une raison qui
+  demande à Conductor de fournir ou créer la branche : jamais d'exécution sur HEAD détaché ni sur `main`.
+- **Historique** : un prompt `P<n>` exige que les prompts qui le précèdent dans le découpage, sur la même
+  branche, soient déjà committés (`[<ID>] P<k> — …`, y compris avec un préfixe de sujet) ; un prompt déjà
+  committé est refusé (`blocked`). Hors Conductor, `--rejouer` reprend volontairement un prompt committé
+  (il ne lève jamais l'ordre) ; l'option est interdite avec `--conductor`. Le commit peut n'être que local :
+  `lot.mjs` lit l'historique du worktree, pas le dépôt distant.
+- **Action** : quand `status = action_required`, `action` porte `id`, `type`
+  (`authenticated-browser`, `secret`, `decision`, `external-submit`, `deployment`), `responsible`, `url`,
+  `instructions`, `forbidden`, `evidence_path`, `evidence_rule` (`file_exists_nonempty`),
+  `resume_command` et `not_before`. Clé d'idempotence côté Conductor : `action.id` + `lot` + `prompt`.
+- **Secrets** : aucune valeur de secret ni donnée de compte ne figure dans `CONDUCTOR_RESULT`.
+- **Compatibilité** : `--depuis <ref>` (passé par les versions de Conductor antérieures au contrat) est
+  accepté et sans effet ; toute autre option inconnue donne `error`.
+
+### Clôture d'un lot
+
+La clôture se lance hors Conductor : `node scripts/lot.mjs <ID> cloture`. Le dernier prompt d'un lot peut
+passer le lot à `done` dans le plan (S2.1 P3) ; la clôture reste alors autorisée si, et seulement si, la
+branche courante est celle du lot, le lot a un découpage et **tous** les prompts de cette branche ont leur
+commit : le statut `done` vient alors des commits de la branche. Un lot `done` avant le début des travaux
+reste « TERMINÉ » et non relançable.
 
 ## Passerelle « Action humaine »
 
-Le format cible est `ACTION HUMAINE REQUISE`. Quand `/lot --conductor` le renvoie, l'orchestrateur
-doit créer une tâche dans **Notes → Tâches**, mettre le run en `waiting_action`, puis attendre la
-preuve. La tâche contient :
+Le format est `ACTION HUMAINE REQUISE` (texte) et `CONDUCTOR_RESULT.action` (JSON). Quand
+`/lot --conductor` le renvoie, l'orchestrateur doit créer une tâche dans **Notes → Tâches**, mettre le run
+en `waiting_action`, puis attendre la preuve. La tâche contient :
 
 - identifiant stable, lot et prompt ;
 - responsable et échéance éventuelle ;
@@ -79,12 +123,33 @@ preuve. La tâche contient :
 - commande exacte de reprise.
 
 La clôture de la tâche ne doit pas relancer tout le lot. Elle relance uniquement le prompt indiqué,
-sur la même branche distante. La première application est `S2.1-A1` : ouvrir Search Console dans un
-Chrome déjà connecté, relever treize lignes sans action Google, déposer
+sur la même branche. La première application est `S2.1-A1` : ouvrir Search Console dans un Chrome déjà
+connecté, relever les indicateurs de la baseline sans action Google, déposer
 `docs/marketing/seo/search-console/2026-10-26/capture-gsc-j4.md`, puis reprendre `S2.1 P1`.
 
 Tant que Conductor ne transforme pas automatiquement le bloc structuré en tâche, l'agent rend le
 bloc et s'arrête. Un humain crée/termine la tâche ; le run n'est pas converti en approbation Git.
+
+### La preuve : ce que `lot.mjs` vérifie, et comment elle arrive dans le worktree
+
+`lot.mjs` considère la preuve valide si le fichier `evidence_path` : existe **dans le dépôt** (chemin
+relatif, sans `..`, sans lien symbolique qui sorte du dépôt), est un fichier régulier et n'est **pas vide**
+(pas seulement des blancs). Il ne dit rien de qui l'a écrit ni du contenu : le contenu minimal se vérifie
+dans le prompt de reprise (S2.1 P1 le relit face à la baseline) et à la relecture.
+
+L'agent ne crée jamais la preuve lui-même. Hypothèse de travail pour son arrivée (**INCONNU : seul
+Conductor sait comment il rapatrie un fichier dans le worktree d'un run**) : la personne responsable
+dépose le fichier assaini, chiffres et libellés seulement, sur la branche du lot (commit puis push sur
+`lot/S2.1-releve-google-j4`, ou dépôt direct dans le worktree). À vérifier sur l'instance :
+
+- si le worktree de la branche est mis à jour depuis la branche distante avant la reprise (le code de
+  Conductor réutilise un worktree existant d'un prompt à l'autre, INFÉRÉ de sa lecture du 26/10) ;
+- si un fichier non suivi déposé dans le worktree survit à la reprise ;
+- si la tâche humaine peut recevoir le fichier ou seulement un lien.
+
+Tant que ce point n'est pas démontré par un essai à blanc, l'action `S2.1-A1` n'est pas considérée comme
+levée par Conductor : l'humain relance le prompt après avoir vérifié que `lot.mjs` voit le fichier
+(`node scripts/lot.mjs S2.1 P1 --conductor` dans le worktree).
 
 ## Secrets
 
@@ -101,8 +166,8 @@ journalise lectures d'agents et révélations humaines. Règles Tracky :
 
 ## Lancer un prompt
 
-Avant le premier run : accès GitHub opérationnel, PR #139 fusionnée sur `main`, workspace prêt,
-Agent Lot embauché avec la configuration cible et lot réellement prêt.
+Avant le premier run : accès GitHub vérifié sur l'instance, pilotage fusionné sur `main` (lot C8.2),
+workspace prêt, Agent Lot embauché avec la configuration cible et lot réellement prêt.
 
 Depuis la fiche de l'emploi :
 
@@ -113,12 +178,14 @@ Prompt  P1
 
 Puis :
 
-1. Conductor fournit un worktree isolé.
-2. Agent Lot reprend la branche distante du lot ou la crée depuis `origin/main`, sans worktree imbriqué.
-3. `/lot` vérifie statut, date, dépendances, découpage, action requise, branche et commits antérieurs.
-4. Le prompt produit son test ciblé et son commit exact.
-5. Conductor propose le push ; le prompt suivant attend le commit distant.
-6. Après le dernier prompt, une session dédiée lance `/lot <ID> cloture`.
+1. Conductor fournit un worktree isolé sur une branche acceptée (`conductor/<agent>/<exec>` ou
+   `lot/<ID>-<slug>`).
+2. `/lot` vérifie statut, date, dépendances, découpage, branche, prompt déjà fait, ordre des prompts et
+   action requise (voir « Contrat »).
+3. Le prompt produit son test ciblé et son commit exact (`commit_message`).
+4. Conductor propose le push à la validation humaine ; Agent Lot ne pousse pas.
+5. Le prompt suivant exige que les précédents soient committés dans le worktree de la branche.
+6. Après le dernier prompt, une session dédiée, hors Conductor, lance `node scripts/lot.mjs <ID> cloture`.
 
 Le formulaire accepte `P1` à `P999`, pas `cloture`. La clôture lance les contrôles complets, les deux
 relectures et prépare la PR. Fusion et déploiement restent des actions distinctes. Jusqu'au
