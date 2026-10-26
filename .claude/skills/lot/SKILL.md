@@ -68,7 +68,9 @@ Si la version courante de Conductor ne sait pas encore créer cette tâche autom
 
 S'arrêter si un fait métier manque ou si le prompt déborde nettement de 30 minutes. L'ordre des prompts
 est imposé par le script (un prompt antérieur sans commit donne `ORDRE DES PROMPTS`, un prompt déjà
-committé `DÉJÀ FAIT`). Formuler la décision manquante avec options et recommandation.
+committé `DÉJÀ FAIT`). `--rejouer` (hors Conductor seulement, interdit avec `--conductor`) reprend
+volontairement un prompt déjà committé ; il ne lève jamais l'ordre des prompts. Formuler la décision
+manquante avec options et recommandation.
 
 ## `/lot <ID>` sans découpage
 

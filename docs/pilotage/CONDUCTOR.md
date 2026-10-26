@@ -10,9 +10,11 @@
 
 - Dépôt : `vizyo-agency/vizyo-tracky`, public, branche de base `main`. Le dépôt a été transféré depuis
   un compte personnel ; l'ancienne adresse redirige. OBSERVÉ le 26/10.
-- `main` est protégée : une approbation est requise avant fusion et aucun contrôle automatique n'est
-  exigé par la protection. Le dépôt n'avait aucun workflow au 25/10 ; la CI minimale du pilotage est
-  décrite dans `.github/workflows/pilotage.yml` (non exigée). OBSERVÉ le 26/10.
+- `main` est protégée : une approbation est requise avant fusion, aucun contrôle automatique n'est exigé
+  par la protection, et `enforce_admins` vaut `false` (les administrateurs ne sont pas soumis à la règle).
+  OBSERVÉ le 26/10 par lecture de la protection. Ce dernier réglage est **à trancher par le propriétaire** ;
+  ce dépôt n'affirme rien de plus. Le dépôt n'avait aucun workflow au 25/10 ; la CI minimale du pilotage
+  est décrite dans `.github/workflows/pilotage.yml` (non exigée). OBSERVÉ le 26/10.
 - Branche de pilotage : `chore/tracky-lot-pilotage` ; PR de pilotage : n° 139. Sa fusion est une décision
   humaine séparée (lot C8.2).
 - Projet Conductor `tracky`, agent `agent-lot`, fuseau Europe/Paris, pile Angular · Node.js ·
@@ -30,6 +32,25 @@ anonyme ne suffit pas au workflow.
 Historique daté : le 25/10 le dépôt appartenait à un compte personnel alors que l'App privée ne
 s'installe que sur l'organisation ; le transfert vers l'organisation a depuis été fait. Aucune
 référence à l'ancien propriétaire n'est à réécrire : les liens d'anciennes PR sont redirigés.
+
+## Prérequis avant le premier run
+
+Conductor lit `scripts/lot.mjs`, `docs/pilotage/` et le skill `/lot` sur **`origin/main`** (INFÉRÉ de sa
+phase de préparation) ; rien de ce qui n'y est pas fusionné n'existe pour lui. Dans l'ordre :
+
+1. **La PR #139 doit être fusionnée, par squash**, pour ne pas publier l'historique de ses anciens
+   commits (ils portent des noms qui ont été généralisés depuis ; le dépôt est public). Sa fusion est une
+   décision humaine séparée (lot C8.2).
+2. **Puis la branche de correctifs, en PR séparée** : le contrat `CONDUCTOR_RESULT`, la branche unique,
+   l'historique `origin/main..HEAD` et le reste de ce document n'existent que sur elle. Après un squash de
+   la #139, cette branche (bâtie sur les commits d'origine de la #139, dernier commit `3ee922da`) doit être
+   refaite sur la nouvelle `origin/main` avant d'ouvrir sa PR (INFÉRÉ : sans cela, ses commits
+   rejouent les changements déjà squashés) ; ce geste est celui du propriétaire, il n'est pas fait ici.
+3. Les autres prérequis (App GitHub, workspace, emploi Agent Lot, essai à blanc de la preuve) sont listés
+   ci-dessus et restent **à vérifier sur l'instance**.
+
+Tant que 1 et 2 ne sont pas faits, la phase de préparation de Conductor ne trouve pas le contrat et
+répond « illisible » : c'est un arrêt sûr, pas une panne.
 
 ## Configuration cible d'Agent Lot
 
@@ -52,8 +73,10 @@ de bloquer.
 
 ## Contrat `lot.mjs --conductor` ↔ Conductor (v1.1)
 
-Invocation, depuis la racine du **worktree de la branche du lot** (jamais depuis le worktree de base
-détaché, qui n'a ni la branche ni les preuves) :
+Invocation, depuis la racine du **worktree de la branche du lot** pour exécuter un prompt. Lancé depuis un
+worktree de base à HEAD détaché, `--conductor` répond **volontairement** `blocked` (« HEAD détaché »,
+`branch.current = null`) : c'est la porte de branche, qui dit à Conductor qu'il doit fournir ou créer
+`conductor/agent-lot/<ID>`. Ce worktree n'a ni la branche ni les preuves : on n'y exécute jamais un prompt.
 
 ```text
 node scripts/lot.mjs <LOT_ID> <PROMPT_ID> --conductor     # PROMPT_ID = P1 … P999
@@ -75,8 +98,11 @@ ligne de stdout**, toujours, est `CONDUCTOR_RESULT <json compact>` :
 | 3 | `blocked` / `too_early` | Non prêt : statut, dépendance ouverte, prompt déjà fait, ordre des prompts, branche non conforme, lot non découpé, clôture demandée. `too_early` : la date minimale n'est pas atteinte. |
 | 4 | `action_required` | Action humaine requise : ni échec, ni validation de code. |
 
-`exit_code` du JSON = code de sortie du processus. Hors `--conductor`, la ligne n'est pas émise et les
-codes historiques restent inchangés (0 prêt, 2 usage, 3 non prêt).
+`exit_code` du JSON = code de sortie du processus. Hors `--conductor`, la ligne n'est pas émise ; les codes
+sont 0 prêt, 2 usage ou erreur interne, 3 non prêt. **Trois comportements sont nouveaux** par rapport au
+lanceur d'avant le contrat, même hors Conductor : un prompt déjà committé est refusé (3, `DÉJÀ FAIT`, au
+lieu d'un simple avertissement), l'ordre des prompts est imposé (3, `ORDRE DES PROMPTS`) et une panne de
+git donne 2 (au lieu d'un historique vide).
 
 Ordre des portes en mode Conductor : usage et plan → statut/date/dépendances → clôture refusée →
 prompt connu et autorisé (`execution.prompts`) → **branche** → prompt déjà committé → ordre des prompts →
@@ -132,8 +158,11 @@ reste « TERMINÉ » et non relançable.
 ## Passerelle « Action humaine »
 
 Le format est `ACTION HUMAINE REQUISE` (texte) et `CONDUCTOR_RESULT.action` (JSON). Quand
-`/lot --conductor` le renvoie, l'orchestrateur doit créer une tâche dans **Notes → Tâches**, mettre le run
-en `waiting_action`, puis attendre la preuve. La tâche contient :
+`/lot --conductor` le renvoie, l'orchestrateur doit créer une tâche dans **Notes → Tâches**, terminer le
+run sans échec ni validation de code, puis attendre la preuve. Le statut exact du run est celui de
+l'instance : la version de Conductor lue le 26/10 termine le run en `skipped` avec la tâche créée (INFÉRÉ
+de sa lecture), un état d'attente dédié (`waiting_action`) restant une cible ; ce dépôt ne garantit pas
+ce libellé. La tâche contient :
 
 - identifiant stable, lot et prompt ;
 - responsable et échéance éventuelle ;
@@ -181,6 +210,27 @@ Tant que ce point n'est pas démontré par un essai à blanc, l'action `S2.1-A1`
 levée par Conductor : l'humain relance le prompt après avoir vérifié que `lot.mjs` voit le fichier
 (`node scripts/lot.mjs S2.1 P1 --conductor` dans le worktree de la branche `conductor/agent-lot/S2.1`).
 
+## Dépôt public : politique des pilotes
+
+Le dépôt cible est **public** : tout ce qui est poussé est lisible par tous, et ce que l'agent peut lire
+en lecture libre peut finir dans un commit. Politique côté Tracky, jusqu'à décision contraire du
+propriétaire :
+
+- **Les pilotes se limitent à des lots documentaires** (relevé ou texte, sans code applicatif, sans
+  migration, sans déploiement). Lesquels des lots découpés (S2.1 : relevé en Markdown ; S2.2 : textes et
+  liens de la landing `lp/`) entrent dans cette définition est une décision du propriétaire, pas de ce
+  document.
+- **Aucun secret ni donnée sensible dans une preuve ou un commit** : chiffres et libellés seulement ; pas
+  de cookie, jeton, mot de passe, adresse e-mail, identifiant de compte, adresse réseau interne ni capture
+  portant un compte. Les interdits de chaque action le répètent.
+- **Avant d'approuver un push**, relire le diff (`git diff origin/main...<branche>` dans le worktree) :
+  l'écran de validation de Conductor n'est pas supposé montrer le diff complet.
+- Contrat v1.1 § 8, côté Conductor : scan des lignes ajoutées avant tout push (fermé en cas d'erreur),
+  diff et résultat du scan visibles dans la validation avant approbation. **INCONNU : à vérifier sur
+  l'instance** que c'est livré ; ce dépôt ne peut pas l'affirmer.
+- `enforce_admins` de `main` vaut actuellement `false` (OBSERVÉ le 26/10) : à trancher par le propriétaire.
+  Rien de plus n'est affirmé ici sur ses conséquences.
+
 ## Secrets
 
 Le coffre projet masque les valeurs, accepte un nom de variable, une portée et un grade minimal, et
@@ -196,8 +246,9 @@ journalise lectures d'agents et révélations humaines. Règles Tracky :
 
 ## Lancer un prompt
 
-Avant le premier run : accès GitHub vérifié sur l'instance, pilotage fusionné sur `main` (lot C8.2),
-workspace prêt, Agent Lot embauché avec la configuration cible et lot réellement prêt.
+Avant le premier run : les prérequis ci-dessus (PR #139 fusionnée par squash, puis les correctifs en PR
+séparée, lot C8.2), accès GitHub vérifié sur l'instance, workspace prêt, Agent Lot embauché avec la
+configuration cible et lot réellement prêt.
 
 Depuis la fiche de l'emploi :
 
@@ -215,6 +266,13 @@ Puis :
 3. Le prompt produit son test ciblé et son commit exact (`commit_message`).
 4. Conductor propose le push à la validation humaine ; Agent Lot ne pousse pas.
 5. Le prompt suivant exige que les précédents soient committés dans le worktree de la branche.
+   Contrat v1.1 § 7, côté Conductor : avant d'exécuter un prompt, le worktree de la branche est
+   resynchronisé avec la base (`fetch`, puis vérification que `docs/pilotage/**` et `scripts/lot.mjs` de
+   la branche ne divergent pas de `origin/main`) ; en cas de divergence, `blocked` « branche en retard »,
+   sans rebase automatique. **À VÉRIFIER SUR L'INSTANCE** : S2.1 P3 et S2.2 P4 modifient
+   `docs/pilotage/plan.json` (et `PLAN.md`) sur la branche du lot ; si la vérification compare naïvement
+   la branche à `origin/main`, elle bloquerait ces prompts. Ce que l'implémentation tolère (retard de la
+   branche seulement, ou aussi ses propres commits) n'est pas décidé ici.
 6. Après le dernier prompt, une session dédiée, hors Conductor, lance `node scripts/lot.mjs <ID> cloture`.
 
 Le formulaire accepte `P1` à `P999`, pas `cloture`. La clôture lance les contrôles complets, les deux
