@@ -11,11 +11,17 @@ export const PROMPT_ID = /^P\d{1,3}$/;
 /** Codes de sortie du processus (contrat Conductor v1 : `docs/pilotage/CONDUCTOR.md`). */
 export const EXIT = Object.freeze({ READY: 0, ERROR: 2, BLOCKED: 3, ACTION_REQUIRED: 4 });
 export const CONDUCTOR_RESULT_VERSION = 1;
-export const ACCEPTED_BRANCHES = Object.freeze(['conductor/<agent>/<exec>', 'lot/<ID>-<slug>']);
+/** Branche d'exécution UNIQUE d'un lot en mode Conductor (contrat v1.1 § 1) : une branche par lot, de P1 à Pn. */
+export const conductorBranch = (lotId) => `conductor/agent-lot/${lotId}`;
+/** Les deux motifs acceptés en `--conductor`, l'identifiant du lot rempli (`<ID>` tant que le lot est inconnu). */
+export function acceptedBranches(lotId) {
+  const id = LOT_ID.test(lotId ?? '') ? lotId : '<ID>';
+  return [conductorBranch(id), `lot/${id}-<slug>`];
+}
 export const HUMAN_ACTION_TYPES = Object.freeze(['authenticated-browser', 'secret', 'decision', 'external-submit', 'deployment']);
 export const EVIDENCE_RULE = 'file_exists_nonempty';
 
-const CONDUCTOR_BRANCH = /^conductor\/[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const CONDUCTOR_LOT_BRANCH = /^conductor\/agent-lot\/(.+)$/;
 const LOT_BRANCH = /^lot\/([A-Z]\d\.\d+)-([a-z0-9][a-z0-9._-]*)$/;
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'dev', 'develop', 'prd', 'prod', 'production', 'staging']);
 const ISO_WITH_OFFSET = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -135,23 +141,30 @@ export function inspectEvidence(repoRoot, relativePath) {
 }
 
 /**
- * Branche d'exécution en mode Conductor : `conductor/<agent>/<exec>` (préfixe natif de Conductor) ou
- * `lot/<ID>-<slug>` du MÊME lot (et, si le plan en déclare une, exactement celle-là). Jamais HEAD détaché, jamais `main`.
+ * Branche d'exécution en mode Conductor (contrat v1.1 § 1) : `conductor/agent-lot/<ID>` où <ID> est EXACTEMENT le lot
+ * demandé (une branche par lot, réutilisée de P1 à Pn), ou `lot/<ID>-<slug>` du MÊME lot (et, si le plan en déclare une,
+ * exactement celle-là). Tout autre `conductor/*` (autre lot, autre agent, `conductor/<agent>/<exec>`), HEAD détaché et
+ * `main` sont refusés.
  */
 export function classifyBranch(current, lot, expected = null) {
   if (!current) {
-    return { ok: false, reason: 'HEAD détaché : Conductor doit fournir ou créer une branche conductor/<agent>/<exec> ou lot/<ID>-<slug> avant d’exécuter' };
+    return { ok: false, reason: `HEAD détaché : Conductor doit fournir ou créer la branche ${conductorBranch(lot.id)} avant d’exécuter` };
   }
   if (PROTECTED_BRANCHES.has(current)) return { ok: false, reason: `branche protégée « ${current} » : jamais d’exécution ici` };
   if (current.includes('..')) return { ok: false, reason: `nom de branche « ${current} » non sûr` };
-  if (CONDUCTOR_BRANCH.test(current)) return { ok: true, kind: 'conductor' };
+  if (current === conductorBranch(lot.id)) return { ok: true, kind: 'conductor' };
+  if (current.startsWith('conductor/')) {
+    const other = CONDUCTOR_LOT_BRANCH.exec(current)?.[1];
+    if (other && LOT_ID.test(other)) return { ok: false, reason: `branche « ${current} » appartient au lot ${other}, pas à ${lot.id}` };
+    return { ok: false, reason: `branche « ${current} » refusée : en mode Conductor, seule ${conductorBranch(lot.id)} est acceptée (une branche par lot)` };
+  }
   const match = LOT_BRANCH.exec(current);
   if (match) {
     if (match[1] !== lot.id) return { ok: false, reason: `branche « ${current} » appartient au lot ${match[1]}, pas à ${lot.id}` };
     if (expected && current !== expected) return { ok: false, reason: `branche « ${current} » ≠ branche du lot « ${expected} »` };
     return { ok: true, kind: 'lot' };
   }
-  return { ok: false, reason: `branche « ${current} » non conforme : attendu ${ACCEPTED_BRANCHES.join(' ou ')}` };
+  return { ok: false, reason: `branche « ${current} » non conforme : attendu ${acceptedBranches(lot.id).join(' ou ')}` };
 }
 
 function normalizeEvidenceVerdict(verdict) {
@@ -222,7 +235,9 @@ export function parseDecoupage(rawText) {
   for (const match of text.matchAll(stepPattern)) {
     const body = match[3];
     const responsible = /^Responsable : (.+)$/m.exec(body)?.[1]?.trim();
+    // `Branche :` = branche du dépôt MANUEL ; `Branche Conductor :` (facultative) = branche unique du lot dans Conductor.
     const branch = /^Branche : (.+)$/m.exec(body)?.[1]?.trim() ?? null;
+    const conductorBranchLine = /^Branche Conductor : (.+)$/m.exec(body)?.[1]?.trim() ?? null;
     const prompts = [];
     const promptPattern = /### (P\d+) · ([^\r\n]+)\r?\n([\s\S]*?)(?=\r?\n### P\d+ ·|$)/g;
     for (const promptMatch of body.matchAll(promptPattern)) {
@@ -244,7 +259,7 @@ export function parseDecoupage(rawText) {
         out: field('Hors périmètre'),
       });
     }
-    steps.push({ number: Number(match[1]), title: match[2].trim(), responsible, branch, prompts });
+    steps.push({ number: Number(match[1]), title: match[2].trim(), responsible, branch, conductorBranch: conductorBranchLine, prompts });
   }
   return { ...meta, state, steps };
 }
@@ -275,12 +290,15 @@ function flattenPrompts(decoupage, lot) {
   return flat;
 }
 
-/** Les prompts qui précèdent `promptId` dans le découpage ET se codent sur la même branche. */
-export function promptsBefore(decoupage, lot, promptId) {
+/**
+ * Les prompts qui précèdent `promptId` dans le découpage ET se codent sur la même branche. Sur la branche unique
+ * `conductor/agent-lot/<ID>` (`unified`), TOUS les prompts précédents comptent : il n'y a qu'une branche pour tout le lot.
+ */
+export function promptsBefore(decoupage, lot, promptId, unified = false) {
   const flat = flattenPrompts(decoupage, lot);
   const index = flat.findIndex((candidate) => candidate.id === promptId);
   if (index < 0) return [];
-  return flat.slice(0, index).filter((candidate) => candidate.branch === flat[index].branch).map((candidate) => candidate.id);
+  return flat.slice(0, index).filter((candidate) => unified || candidate.branch === flat[index].branch).map((candidate) => candidate.id);
 }
 
 /** Les prompts de la branche qui n'ont pas de commit (clôture). Une étape sans branche vaut pour toutes. */
@@ -295,15 +313,17 @@ export function remainingPrompts(decoupage, branch, done) {
 
 /**
  * Règle de clôture d'un lot déjà `done` : le dernier prompt passe le lot à `done` dans le plan (S2.1 P3). La clôture
- * reste donc possible si, et seulement si, la branche courante est celle du lot, que le lot a un découpage, et que TOUS
- * les prompts de cette branche ont leur commit `[<ID>] P<n> — …` : le statut `done` vient alors de ces commits.
- * Un lot `done` sans ces commits (fait avant le début des travaux) reste TERMINÉ.
+ * reste donc possible si, et seulement si, la branche courante est celle du lot (`lot.branch`, ou `conductor/agent-lot/<ID>`
+ * qui porte alors TOUS les prompts), que le lot a un découpage, et que TOUS les prompts de cette branche ont leur commit
+ * `[<ID>] P<n> — …` : le statut `done` vient alors de ces commits. Un lot `done` sans ces commits (fait avant le début
+ * des travaux) reste TERMINÉ.
  */
 export function clotureAfterWork(lot, decoupage, branch, done) {
   if (lot.status !== 'done' || !decoupage || !branch) return false;
-  if (lot.branch && branch !== lot.branch) return false;
-  const onBranch = decoupage.steps.filter((step) => !step.branch || step.branch === branch).flatMap((step) => step.prompts);
-  return onBranch.length > 0 && remainingPrompts(decoupage, branch, done).length === 0;
+  const unified = branch === conductorBranch(lot.id);
+  if (!unified && lot.branch && branch !== lot.branch) return false;
+  const onBranch = decoupage.steps.filter((step) => unified || !step.branch || step.branch === branch).flatMap((step) => step.prompts);
+  return onBranch.length > 0 && remainingPrompts(decoupage, unified ? null : branch, done).length === 0;
 }
 
 function findCycle(lots) {
@@ -407,6 +427,9 @@ export function validatePlan(plan, options = {}) {
         const promptIds = new Set();
         for (const step of parsed.steps) {
           if (!step.responsible) errors.push(`${lot.id}: responsable manquant à l'étape ${step.number}`);
+          if (step.conductorBranch && step.conductorBranch !== conductorBranch(lot.id)) {
+            errors.push(`${lot.id}: « Branche Conductor » de l'étape ${step.number} = ${step.conductorBranch}, attendu ${conductorBranch(lot.id)} (une branche par lot)`);
+          }
           for (const prompt of step.prompts) {
             if (promptIds.has(prompt.id)) errors.push(`${lot.id}: prompt dupliqué ${prompt.id}`);
             promptIds.add(prompt.id);
@@ -550,7 +573,7 @@ export function conductorLine(result) {
     lot: result.lot ?? null,
     prompt: result.prompt ?? null,
     reason: result.reason ?? null,
-    branch: { current: result.current ?? null, accepted: [...ACCEPTED_BRANCHES] },
+    branch: { current: result.current ?? null, accepted: acceptedBranches(result.lot) },
     action: result.action ?? null,
     commit_message: result.commit_message ?? null,
   })}`;
@@ -703,6 +726,7 @@ export function run(argv = [], env = {}) {
     const { step, prompt } = found;
     state.commit = commitMessage(lot, step, prompt);
     const expectedBranch = step.branch ?? lot.branch ?? null;
+    let branchKind = null;
 
     const allowed = lot.execution?.prompts;
     if (conductorMode && allowed?.length && !allowed.includes(prompt.id)) {
@@ -721,6 +745,7 @@ export function run(argv = [], env = {}) {
         io.log(`# [${lot.id}] ${prompt.id}\n\n**MAUVAISE BRANCHE** — ${verdict.reason}. S'arrêter.`);
         return finish('blocked', EXIT.BLOCKED, `MAUVAISE BRANCHE — ${verdict.reason}`);
       }
+      branchKind = verdict.kind;
     } else if (expectedBranch && currentBranch !== expectedBranch) {
       io.log(`# [${lot.id}] ${prompt.id}\n\n**MAUVAISE BRANCHE** — session sur \`${currentBranch || 'inconnue'}\`, prompt sur \`${expectedBranch}\`. S'arrêter.`);
       return finish('blocked', EXIT.BLOCKED, 'MAUVAISE BRANCHE');
@@ -731,7 +756,7 @@ export function run(argv = [], env = {}) {
       io.log(`# [${lot.id}] ${prompt.id}\n\n**DÉJÀ FAIT** — ${reason}`);
       return finish('blocked', EXIT.BLOCKED, reason);
     }
-    const missing = promptsBefore(decoupage, lot, prompt.id).filter((previous) => !done.has(previous));
+    const missing = promptsBefore(decoupage, lot, prompt.id, branchKind === 'conductor').filter((previous) => !done.has(previous));
     if (missing.length) {
       const reason = `ORDRE DES PROMPTS — ${prompt.id} exige d’abord ${missing.join(', ')} (commit « [${lot.id}] P<n> — … » absent de la branche).`;
       io.log(`# [${lot.id}] ${prompt.id}\n\n**${reason}**`);
@@ -753,7 +778,9 @@ export function run(argv = [], env = {}) {
     }
 
     io.log(`# [${lot.id}] ${prompt.id} · ${prompt.title} — ${prompt.duration} min`);
-    io.log(`Étape ${step.number} · ${step.title} — ${step.responsible} · branche \`${step.branch ?? lot.branch ?? 'à créer'}\``);
+    // En mode Conductor, la branche d'exécution est celle du contrat (une par lot), pas la branche « manuelle » du découpage.
+    const shownBranch = conductorMode ? (branchKind === 'conductor' ? conductorBranch(lot.id) : currentBranch) : (step.branch ?? lot.branch ?? 'à créer');
+    io.log(`Étape ${step.number} · ${step.title} — ${step.responsible} · branche \`${shownBranch}\``);
     if (conductorMode) {
       io.log('\n## Conductor');
       io.log('- Travailler dans le worktree isolé fourni ; ne pas créer de worktree imbriqué.');
@@ -780,11 +807,13 @@ export function run(argv = [], env = {}) {
         io.error(`git indisponible : ${g.branchError ?? 'erreur inconnue'}`);
         return finish('error', EXIT.ERROR, `git indisponible : ${g.branchError ?? 'erreur inconnue'}`);
       }
-      if (lot.branch && currentBranch !== lot.branch) {
-        io.log(`# [${lot.id}] clôture\n\n**MAUVAISE BRANCHE** — session sur \`${currentBranch || 'inconnue'}\`, lot sur \`${lot.branch}\`. S'arrêter.`);
+      // Hors Conductor, la clôture se fait sur la branche du lot OU sur la branche unique d'une exécution Conductor.
+      const unified = currentBranch === conductorBranch(lot.id);
+      if (lot.branch && currentBranch !== lot.branch && !unified) {
+        io.log(`# [${lot.id}] clôture\n\n**MAUVAISE BRANCHE** — session sur \`${currentBranch || 'inconnue'}\`, lot sur \`${lot.branch}\` ou \`${conductorBranch(lot.id)}\`. S'arrêter.`);
         return finish('blocked', EXIT.BLOCKED, 'MAUVAISE BRANCHE');
       }
-      const remaining = remainingPrompts(decoupage, currentBranch, done);
+      const remaining = remainingPrompts(decoupage, unified ? null : currentBranch, done);
       io.log(`# [${lot.id}] clôture — branche ${currentBranch || 'inconnue'}`);
       if (remaining.length) {
         const reason = `PAS PRÊTE — prompts sans commit : ${remaining.join(', ')}.`;

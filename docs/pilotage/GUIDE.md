@@ -83,7 +83,9 @@ La clôture, une fois par branche, dans une session dédiée hors Conductor :
 
 ## 4. Git et worktrees
 
-- Une branche par PR : `lot/<ID>-<slug>`.
+- Une branche par PR : `lot/<ID>-<slug>` en dépôt manuel. Dans Conductor, une seule branche par lot,
+  `conductor/agent-lot/<ID>`, réutilisée de P1 à Pn (un seul run à la fois) ; la PR part de cette branche
+  et la clôture s'y lance aussi, hors Conductor.
 - Un worktree par branche. Une session ne code jamais dans le worktree d'une autre branche.
 - Une branche poussée se met à jour par fusion de `origin/main`, jamais par rebase.
 - Au-delà d'environ 500 lignes de code hors tests, séparer les PR ou justifier l'écart.

@@ -36,8 +36,8 @@ référence à l'ancien propriétaire n'est à réécrire : les liens d'ancienne
 - grade Senior ; Claude Sonnet 5 ; période d'essai de 10 exécutions ;
 - seuil hérité de 70 % ; parallélisme 1 ;
 - déclencheur manuel uniquement ; aucun planning et aucun webhook GitHub ;
-- un worktree isolé par branche ; branche `conductor/<agent>/<exec>` fournie par Conductor ou
-  `lot/<ID>-<slug>` ;
+- un worktree isolé par branche ; **une branche par lot** : `conductor/agent-lot/<ID>`, réutilisée de P1
+  à Pn (un seul run à la fois pour un lot), ou, en dépôt manuel, `lot/<ID>-<slug>` ;
 - Agent Lot committe mais ne pousse jamais et n'ouvre pas de PR ; Conductor propose le push dans
   Validations ; la PR, la fusion et le déploiement sont des gestes séparés, chacun avec sa décision ;
 - Reviewer relit la PR ; Merger peut préparer une fusion séparée si cet agent est ensuite embauché ;
@@ -50,7 +50,7 @@ seul lot prêt, découpé et décrit pour Agent Lot. Désormais, tout prompt exi
 est candidat ; statut, date, dépendances, branche, ordre des prompts et actions humaines continuent
 de bloquer.
 
-## Contrat `lot.mjs --conductor` ↔ Conductor (v1)
+## Contrat `lot.mjs --conductor` ↔ Conductor (v1.1)
 
 Invocation, depuis la racine du **worktree de la branche du lot** (jamais depuis le worktree de base
 détaché, qui n'a ni la branche ni les preuves) :
@@ -64,7 +64,7 @@ ligne de stdout**, toujours, est `CONDUCTOR_RESULT <json compact>` :
 
 ```json
 {"version":1,"status":"ready","exit_code":0,"lot":"S2.1","prompt":"P1","reason":null,
- "branch":{"current":"conductor/agent-lot/abc123","accepted":["conductor/<agent>/<exec>","lot/<ID>-<slug>"]},
+ "branch":{"current":"conductor/agent-lot/S2.1","accepted":["conductor/agent-lot/S2.1","lot/S2.1-<slug>"]},
  "action":null,"commit_message":"[S2.1] P1 — Titre du prompt"}
 ```
 
@@ -83,10 +83,16 @@ prompt connu et autorisé (`execution.prompts`) → **branche** → prompt déj�
 **action humaine** → `ready`. La branche passe avant la preuve : la preuve vit dans le worktree de la
 branche du lot, la chercher ailleurs donnerait un faux « absent ».
 
-- **Branche** : `conductor/<agent>/<exec>` (préfixe natif de Conductor) ou `lot/<ID>-<slug>` du même
-  lot (exactement celle du plan si elle y est déclarée). HEAD détaché, `main` et les branches
-  d'intégration donnent `blocked`, avec `branch.current = null` pour un HEAD détaché et une raison qui
-  demande à Conductor de fournir ou créer la branche : jamais d'exécution sur HEAD détaché ni sur `main`.
+- **Branche (une par lot)** : en mode `--conductor`, la branche d'exécution est `conductor/agent-lot/<ID>`
+  où `<ID>` est **exactement** le lot demandé (`conductor/agent-lot/S2.1` pour `S2.1`), la même de P1 à
+  Pn ; ou, en dépôt manuel, `lot/<ID>-<slug>` du même lot (exactement celle du plan si elle y est
+  déclarée). `branch.accepted` liste ces deux motifs avec l'identifiant rempli. **Tout autre `conductor/*`**
+  (autre lot, autre agent, ancien format `conductor/<agent>/<exec>`, casse différente), HEAD détaché,
+  `main` et les branches d'intégration donnent `blocked` : la branche d'un autre lot ne sert jamais.
+  Pour un HEAD détaché, `branch.current = null` et la raison demande à Conductor de fournir ou créer la
+  branche `conductor/agent-lot/<ID>` : jamais d'exécution sur HEAD détaché ni sur `main`. Sur la branche
+  unique, l'ordre des prompts compte **tous** les prompts précédents du lot, quelle que soit la `Branche :`
+  de leur étape dans le découpage (cette ligne décrit le dépôt manuel).
 - **Historique** : un prompt `P<n>` exige que les prompts qui le précèdent dans le découpage, sur la même
   branche, soient déjà committés (`[<ID>] P<k> — …`, y compris avec un préfixe de sujet) ; un prompt déjà
   committé est refusé (`blocked`). Hors Conductor, `--rejouer` reprend volontairement un prompt committé
@@ -102,10 +108,13 @@ branche du lot, la chercher ailleurs donnerait un faux « absent ».
 
 ### Clôture d'un lot
 
-La clôture se lance hors Conductor : `node scripts/lot.mjs <ID> cloture`. Le dernier prompt d'un lot peut
+La clôture se lance hors Conductor, dans une session dédiée : `node scripts/lot.mjs <ID> cloture`. Elle
+accepte la branche du plan (`lot/<ID>-<slug>`) **et** la branche unique d'une exécution Conductor
+(`conductor/agent-lot/<ID>`), qui porte alors tous les prompts du lot. Le dernier prompt d'un lot peut
 passer le lot à `done` dans le plan (S2.1 P3) ; la clôture reste alors autorisée si, et seulement si, la
-branche courante est celle du lot, le lot a un découpage et **tous** les prompts de cette branche ont leur
-commit : le statut `done` vient alors des commits de la branche. Un lot `done` avant le début des travaux
+branche courante est l'une de ces deux branches du lot, le lot a un découpage et **tous** les prompts de
+cette branche ont leur commit : le statut `done` vient alors des commits de la branche. La branche
+Conductor d'un autre lot, ou tout autre `conductor/*`, ne clôture rien. Un lot `done` avant le début des travaux
 reste « TERMINÉ » et non relançable.
 
 ## Passerelle « Action humaine »
@@ -137,19 +146,28 @@ relatif, sans `..`, sans lien symbolique qui sorte du dépôt), est un fichier r
 (pas seulement des blancs). Il ne dit rien de qui l'a écrit ni du contenu : le contenu minimal se vérifie
 dans le prompt de reprise (S2.1 P1 le relit face à la baseline) et à la relecture.
 
-L'agent ne crée jamais la preuve lui-même. Hypothèse de travail pour son arrivée (**INCONNU : seul
-Conductor sait comment il rapatrie un fichier dans le worktree d'un run**) : la personne responsable
-dépose le fichier assaini, chiffres et libellés seulement, sur la branche du lot (commit puis push sur
-`lot/S2.1-releve-google-j4`, ou dépôt direct dans le worktree). À vérifier sur l'instance :
+L'agent ne crée jamais la preuve lui-même. La preuve doit se trouver **sur la branche de l'exécution**,
+c'est-à-dire, en mode Conductor, sur `conductor/agent-lot/<ID>` (pour `S2.1` : `conductor/agent-lot/S2.1`).
+Son nom étant connu d'avance et identique de P1 à Pn, une personne peut y déposer la preuve avant même le
+premier run. Hypothèse de travail (**INFÉRÉ, non démontré ; seul Conductor décide comment il rapatrie un
+fichier dans le worktree d'un run**) : la personne responsable dépose le fichier assaini, chiffres et
+libellés seulement, sur la branche distante `conductor/agent-lot/S2.1` (créée depuis `origin/main` si elle
+n'existe pas, un commit au message libre, **jamais** `[S2.1] P1 — …` qui compterait comme prompt fait,
+puis push), ou bien Conductor recopie le fichier fourni par la tâche humaine dans le worktree de cette
+branche. Aucune de ces deux voies n'est confirmée. **INCONNU, à vérifier sur l'instance :**
 
-- si le worktree de la branche est mis à jour depuis la branche distante avant la reprise (le code de
-  Conductor réutilise un worktree existant d'un prompt à l'autre, INFÉRÉ de sa lecture du 26/10) ;
+- si Conductor crée le worktree d'un lot à partir de la branche distante `conductor/agent-lot/<ID>`
+  quand elle existe, ou depuis la base ;
+- si un worktree déjà créé est mis à jour depuis la branche distante avant la reprise (le code de
+  Conductor réutilise un worktree existant d'un prompt à l'autre, INFÉRÉ de sa lecture du 26/10 ; le
+  contrat v1.1 § 7 ne parle que de resynchroniser la branche avec la base) ;
 - si un fichier non suivi déposé dans le worktree survit à la reprise ;
-- si la tâche humaine peut recevoir le fichier ou seulement un lien.
+- si la tâche humaine peut recevoir le fichier ou seulement un lien ;
+- si la configuration de l'emploi autorise un push humain sur le préfixe `conductor/` de ce dépôt.
 
 Tant que ce point n'est pas démontré par un essai à blanc, l'action `S2.1-A1` n'est pas considérée comme
 levée par Conductor : l'humain relance le prompt après avoir vérifié que `lot.mjs` voit le fichier
-(`node scripts/lot.mjs S2.1 P1 --conductor` dans le worktree).
+(`node scripts/lot.mjs S2.1 P1 --conductor` dans le worktree de la branche `conductor/agent-lot/S2.1`).
 
 ## Secrets
 
@@ -178,8 +196,8 @@ Prompt  P1
 
 Puis :
 
-1. Conductor fournit un worktree isolé sur une branche acceptée (`conductor/<agent>/<exec>` ou
-   `lot/<ID>-<slug>`).
+1. Conductor fournit un worktree isolé sur la branche du lot (`conductor/agent-lot/<ID>`, ou
+   `lot/<ID>-<slug>` en dépôt manuel), la même pour tous les prompts du lot.
 2. `/lot` vérifie statut, date, dépendances, découpage, branche, prompt déjà fait, ordre des prompts et
    action requise (voir « Contrat »).
 3. Le prompt produit son test ciblé et son commit exact (`commit_message`).

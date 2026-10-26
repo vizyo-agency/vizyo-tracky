@@ -28,8 +28,8 @@ Règles du travail par lots :
 - un prompt de 15 à 30 minutes, cinq fichiers environ, un test ciblé et un commit au message affiché ;
 - aucune suite complète, aucune PR et aucune relecture pendant les prompts ; ces gestes arrivent une
   seule fois à la clôture ;
-- un lot se code sur sa propre branche (`lot/<ID>-<slug>`, ou `conductor/<agent>/<exec>` fournie par
-  Conductor) et arrive sur `main` par PR, jamais par un commit direct de développement ;
+- un lot se code sur sa propre branche (`lot/<ID>-<slug>`, ou `conductor/agent-lot/<ID>` dans Conductor :
+  une seule branche par lot, de P1 à Pn) et arrive sur `main` par PR, jamais par un commit direct de développement ;
 - dans Vizyo Conductor, Agent Lot ne pousse jamais lui-même ; tout prompt découpé peut travailler dans
   le dépôt, tandis qu'un navigateur authentifié, un secret manquant, une décision, une communication
   externe ou un déploiement produit une `ACTION HUMAINE REQUISE` puis une reprise explicite ;

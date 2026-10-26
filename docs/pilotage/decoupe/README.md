@@ -19,6 +19,7 @@ Deux à cinq lignes vérifiables.
 ## Étape 1 · Titre
 Responsable : Youness
 Branche : lot/S2.2-slug
+Branche Conductor : conductor/agent-lot/S2.2
 
 ### P1 · Titre du prompt
 Durée : 25 min
@@ -32,6 +33,11 @@ Test : `commande ciblée`
 Fini quand : critère vérifiable
 Hors périmètre : ce que le prompt ne fait pas
 ```
+
+Branches : `Branche :` est la branche du dépôt **manuel** (`lot/<ID>-<slug>`). Dans Vizyo Conductor, un lot
+se code sur **une seule branche**, `conductor/agent-lot/<ID>`, de P1 à Pn, quel que soit le nombre
+d'étapes : la ligne `Branche Conductor :` (facultative, recommandée) la rappelle et `--check` refuse une
+valeur différente de `conductor/agent-lot/<ID>`. Voir `CONDUCTOR.md`.
 
 Règles : 15 à 30 minutes, un commit, cinq fichiers environ, un test avec le code. Pas de prompt
 « tests seulement », pas de suite complète, pas de relecture, pas de PR : la clôture les fait une

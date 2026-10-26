@@ -21,8 +21,10 @@ Arguments : `$ARGUMENTS`. Sans identifiant, demander lequel.
    suivre le contrat ci-dessous ; ce n'est ni un échec ni une validation de code. En mode `--conductor`,
    la dernière ligne de stdout est `CONDUCTOR_RESULT <json>` : c'est elle que Conductor lit.
 4. Utiliser un worktree par branche. Ne jamais coder dans le dossier partagé ni sur `main`.
-   Dans un worktree isolé fourni par Conductor, reprendre la branche distante indiquée ou la créer
-   depuis `origin/main`, puis relancer le script. Ne pas créer un worktree imbriqué.
+   Dans Conductor, **une seule branche par lot** : `conductor/agent-lot/<ID>` (le lot demandé, exactement),
+   la même de P1 à Pn ; en dépôt manuel, `lot/<ID>-<slug>`. Tout autre `conductor/*` est refusé (`MAUVAISE
+   BRANCHE`). Dans un worktree isolé fourni par Conductor, reprendre la branche distante indiquée ou la
+   créer depuis `origin/main`, puis relancer le script. Ne pas créer un worktree imbriqué.
 
 ## `/lot <ID> P<n>`
 
@@ -58,6 +60,8 @@ Dans Conductor :
 - mettre le run en attente d'action sans commit vide et sans le classer en échec ;
 - ne jamais demander qu'un cookie, jeton, mot de passe ou valeur de secret soit copié dans GitHub ;
 - après la preuve attendue, relancer le prompt indiqué ; `/lot` vérifiera le fichier avant de l'autoriser.
+  La preuve doit se trouver sur la branche de l'exécution (`conductor/agent-lot/<ID>`) ; comment elle y
+  arrive est décrit, avec ses points non démontrés, dans `CONDUCTOR.md` (§ La preuve).
 
 Si la version courante de Conductor ne sait pas encore créer cette tâche automatiquement, rendre le bloc
 `ACTION HUMAINE REQUISE` tel quel et s'arrêter. Ne pas contourner avec une fausse validation.
@@ -87,7 +91,8 @@ Une fois par branche, après tous ses prompts :
 6. mettre à jour le plan et Asana avec les preuves vérifiables.
 
 Le formulaire Agent Lot accepte seulement `P1` à `P999`, pas `cloture`. Après le dernier prompt et
-son push approuvé, exécuter la clôture dans une session dédiée sur la branche, hors Conductor. Elle reste
+son push approuvé, exécuter la clôture dans une session dédiée sur la branche du lot (`lot/<ID>-<slug>`
+ou `conductor/agent-lot/<ID>`), hors Conductor. Elle reste
 possible même si le dernier prompt a passé le lot à `done` dans le plan, tant que les commits de la
 branche le prouvent. Ne pas transformer silencieusement le dernier prompt en clôture complète.
 

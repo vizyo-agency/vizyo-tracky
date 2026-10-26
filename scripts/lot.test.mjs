@@ -6,13 +6,14 @@ import { dirname, join } from 'node:path';
 import test, { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
-  ACCEPTED_BRANCHES,
   EXIT,
   HUMAN_ACTION_TYPES,
+  acceptedBranches,
   classifyBranch,
   clotureAfterWork,
   commitMessage,
   completedPrompts,
+  conductorBranch,
   conductorGate,
   dateGate,
   dependenciesReady,
@@ -143,8 +144,9 @@ test('contrat : la ligne finale a exactement les clés et l’ordre du contrat v
   assert.equal(exitCode, EXIT.READY);
   assert.deepEqual(Object.keys(json), ['version', 'status', 'exit_code', 'lot', 'prompt', 'reason', 'branch', 'action', 'commit_message']);
   assert.deepEqual(Object.keys(json.branch), ['current', 'accepted']);
-  assert.deepEqual(json.branch.accepted, ['conductor/<agent>/<exec>', 'lot/<ID>-<slug>']);
-  assert.deepEqual(json.branch.accepted, [...ACCEPTED_BRANCHES]);
+  assert.deepEqual(json.branch.accepted, ['conductor/agent-lot/T1.1', 'lot/T1.1-<slug>']);
+  assert.deepEqual(json.branch.accepted, acceptedBranches('T1.1'));
+  assert.equal(conductorBranch('T1.1'), 'conductor/agent-lot/T1.1');
   assert.equal(json.version, 1);
 });
 
@@ -279,11 +281,52 @@ test('contrat : aucune valeur de compte ni de secret n’est ajoutée à la lign
 });
 
 // ── Branche d'exécution (mode Conductor) ──────────────────────────────────────────────────────
-test('branche : conductor/<agent>/<exec> est acceptée', () => {
-  const { json, exitCode } = conductor(['T1.1', 'P1'], { branch: 'conductor/agent-lot/abc123' });
+test('branche : conductor/agent-lot/<ID> du lot demandé est acceptée', () => {
+  const { json, exitCode, stdout } = conductor(['T1.1', 'P1'], { branch: 'conductor/agent-lot/T1.1' });
   assert.equal(exitCode, 0);
   assert.equal(json.status, 'ready');
-  assert.equal(json.branch.current, 'conductor/agent-lot/abc123');
+  assert.equal(json.branch.current, 'conductor/agent-lot/T1.1');
+  assert.ok(stdout.includes('· branche `conductor/agent-lot/T1.1`'), 'le brief annonce la branche unique du contrat');
+});
+
+test('branche : branch.accepted porte l’ID du lot rempli, et <ID> tant que le lot est inconnu', () => {
+  assert.deepEqual(conductor(['T1.1', 'P1'], { branch: 'main' }).json.branch.accepted, ['conductor/agent-lot/T1.1', 'lot/T1.1-<slug>']);
+  assert.deepEqual(conductor(['T9.9', 'P1']).json.branch.accepted, ['conductor/agent-lot/T9.9', 'lot/T9.9-<slug>']);
+  const noLot = run(['--conductor'], fixtureEnv()).stdout.trimEnd().split('\n').at(-1);
+  assert.deepEqual(JSON.parse(noLot.slice('CONDUCTOR_RESULT '.length)).branch.accepted, ['conductor/agent-lot/<ID>', 'lot/<ID>-<slug>']);
+});
+
+test('branche : tout autre conductor/* est refusé (autre lot, autre agent, ancien format <agent>/<exec>)', () => {
+  const generic = 'seule conductor/agent-lot/T1.1 est acceptée';
+  const refused = {
+    'conductor/agent-lot/T9.9': 'appartient au lot T9.9, pas à T1.1',
+    'conductor/agent-lot/T1.11': 'appartient au lot T1.11, pas à T1.1',
+    'conductor/agent-lot/t1.1': generic,
+    'conductor/agent-lot/T1.1-bis': generic,
+    'conductor/agent-lot/T1.1/x': generic,
+    'conductor/agent-lot/abc123': generic,
+    'conductor/autre-agent/T1.1': generic,
+    'conductor/agent-lot/exec-42': generic,
+    'conductor/agent-lot': generic,
+  };
+  for (const [branch, expected] of Object.entries(refused)) {
+    const { json, exitCode, stdout } = conductor(['T1.1', 'P1'], { branch });
+    assert.equal(exitCode, 3, branch);
+    assert.equal(json.status, 'blocked', branch);
+    assert.equal(json.branch.current, branch);
+    assert.ok(json.reason.startsWith('MAUVAISE BRANCHE'), json.reason);
+    assert.ok(json.reason.includes(expected), `${branch} : ${json.reason}`);
+    assert.ok(!stdout.includes('## Fichiers'), 'aucune consigne de code sur une branche refusée');
+  }
+});
+
+test('branche : la branche d’un AUTRE lot ne sert jamais, même au bon format', () => {
+  const other = lotFixture({ id: 'T2.1', asana_task_id: 'a2', branch: 'lot/T2.1-autre' });
+  const decoupes = { 'T1.1': decoupageText(), 'T2.1': decoupageText({ lotId: 'T2.1', branch: 'lot/T2.1-autre' }) };
+  const wrong = conductor(['T1.1', 'P1'], { lots: [lotFixture(), other], decoupes, branch: 'conductor/agent-lot/T2.1' });
+  assert.equal(wrong.json.status, 'blocked');
+  assert.ok(wrong.json.reason.includes('appartient au lot T2.1, pas à T1.1'));
+  assert.equal(conductor(['T2.1', 'P1'], { lots: [other], decoupes, branch: 'conductor/agent-lot/T2.1' }).json.status, 'ready');
 });
 
 test('branche : lot/<ID>-<slug> du MÊME lot est acceptée', () => {
@@ -324,22 +367,26 @@ test('branche : une branche non conforme, d’un autre lot ou différente de cel
 
 test('branche : classifyBranch est pur et rend le type accepté', () => {
   const lot = lotFixture();
-  assert.deepEqual(classifyBranch('conductor/agent-lot/x1', lot), { ok: true, kind: 'conductor' });
+  assert.deepEqual(classifyBranch('conductor/agent-lot/T1.1', lot), { ok: true, kind: 'conductor' });
+  assert.equal(classifyBranch('conductor/agent-lot/x1', lot).ok, false);
+  assert.equal(classifyBranch('conductor/agent-lot/T9.9', lot).ok, false);
+  assert.equal(classifyBranch('conductor/agent/T1.1', lot).ok, false);
+  assert.ok(classifyBranch('', lot).reason.includes('HEAD détaché') && classifyBranch('', lot).reason.includes('conductor/agent-lot/T1.1'));
   assert.deepEqual(classifyBranch('lot/T1.1-essai', lot), { ok: true, kind: 'lot' });
   assert.equal(classifyBranch('', lot).ok, false);
   assert.equal(classifyBranch('main', lot).ok, false);
   assert.equal(classifyBranch('conductor/../x', lot).ok, false);
   assert.equal(classifyBranch('lot/T1.1-essai', lot, 'lot/T1.1-autre').ok, false);
-  assert.equal(classifyBranch('conductor/agent/e1', lot, 'lot/T1.1-autre').ok, true);
+  assert.equal(classifyBranch('conductor/agent-lot/T1.1', lot, 'lot/T1.1-autre').ok, true, 'la branche Conductor ne dépend pas du slug du plan');
 });
 
 test('branche : hors Conductor, la branche du lot reste exigée à l’identique', () => {
-  assert.equal(plain(['T1.1', 'P1'], { branch: 'conductor/agent-lot/abc123' }).exitCode, 3);
+  assert.equal(plain(['T1.1', 'P1'], { branch: 'conductor/agent-lot/T1.1' }).exitCode, 3);
   assert.equal(plain(['T1.1', 'P1'], { branch: 'lot/T1.1-essai' }).exitCode, 0);
 });
 
 test('compat : --depuis <ref> (Conductor antérieur au contrat) est accepté et sans effet', () => {
-  const { json } = conductor(['T1.1', 'P1', '--depuis', 'origin/main'], { branch: 'conductor/agent-lot/abc123' });
+  const { json } = conductor(['T1.1', 'P1', '--depuis', 'origin/main'], { branch: 'conductor/agent-lot/T1.1' });
   assert.equal(json.status, 'ready');
 });
 
@@ -410,6 +457,56 @@ test('clôture : refusée en mode Conductor même quand elle serait autorisée h
   assert.equal(json.status, 'blocked');
 });
 
+test('clôture : hors Conductor, la branche unique conductor/agent-lot/<ID> est acceptée (contrat v1.1 § 2)', () => {
+  const branch = 'conductor/agent-lot/T1.1';
+  const ready = plain(['T1.1', 'cloture'], { subjects: ALL_THREE, branch });
+  assert.equal(ready.exitCode, 0);
+  assert.match(ready.stdout, /PRÊTE/);
+  const done = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done' })], subjects: ALL_THREE, branch });
+  assert.equal(done.exitCode, 0);
+  assert.match(done.stdout, /vient des commits de cette branche/);
+  const partial = plain(['T1.1', 'cloture'], { subjects: [FIRST_SUBJECT, SECOND_SUBJECT], branch });
+  assert.equal(partial.exitCode, 3);
+  assert.match(partial.stdout, /PAS PRÊTE — prompts sans commit : P3/);
+  const unfinished = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done' })], subjects: [FIRST_SUBJECT], branch });
+  assert.equal(unfinished.exitCode, 3);
+  assert.match(unfinished.stdout, /TERMINÉ/);
+});
+
+test('clôture : la branche Conductor d’un AUTRE lot, ou un autre conductor/*, ne clôture pas', () => {
+  for (const branch of ['conductor/agent-lot/T9.9', 'conductor/agent-lot/exec-1', 'conductor/agent/T1.1', 'conductor/agent-lot/t1.1']) {
+    const wrong = plain(['T1.1', 'cloture'], { subjects: ALL_THREE, branch });
+    assert.equal(wrong.exitCode, 3, branch);
+    assert.match(wrong.stdout, /MAUVAISE BRANCHE/);
+    const done = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done' })], subjects: ALL_THREE, branch });
+    assert.equal(done.exitCode, 3, branch);
+    assert.match(done.stdout, /TERMINÉ/);
+  }
+});
+
+test('clôture : sur la branche unique, les prompts de TOUTES les étapes comptent, même déclarées sur d’autres branches', () => {
+  const split = decoupageText().replace('## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-essai', '## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-suite');
+  const branch = 'conductor/agent-lot/T1.1';
+  const lot = lotFixture({ status: 'done' });
+  const withP3Only = plain(['T1.1', 'cloture'], { lots: [lot], decoupes: { 'T1.1': split }, subjects: [THIRD_SUBJECT], branch });
+  assert.equal(withP3Only.exitCode, 3, 'P1 et P2 manquent : la branche unique porte tout le lot');
+  const parsed = parseDecoupage(split);
+  assert.equal(clotureAfterWork(lot, parsed, branch, new Set(['P1', 'P2', 'P3'])), true);
+  assert.equal(clotureAfterWork(lot, parsed, branch, new Set(['P1', 'P2'])), false);
+  assert.equal(clotureAfterWork(lot, parsed, 'lot/T1.1-essai', new Set(['P1', 'P2'])), true, 'branche manuelle : seulement ses étapes');
+});
+
+test('ordre : sur la branche unique conductor/agent-lot/<ID>, tout prompt précédent est exigé, quelle que soit l’étape', () => {
+  const split = decoupageText().replace('## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-essai', '## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-suite');
+  const branch = 'conductor/agent-lot/T1.1';
+  const noHistory = conductor(['T1.1', 'P3'], { decoupes: { 'T1.1': split }, branch });
+  assert.equal(noHistory.json.status, 'blocked');
+  assert.ok(noHistory.json.reason.includes('P3 exige d’abord P1, P2'), noHistory.json.reason);
+  const ok = conductor(['T1.1', 'P3'], { decoupes: { 'T1.1': split }, branch, subjects: [SECOND_SUBJECT, FIRST_SUBJECT] });
+  assert.equal(ok.json.status, 'ready');
+  assert.deepEqual(promptsBefore(parseDecoupage(split), lotFixture(), 'P3', true), ['P1', 'P2']);
+});
+
 test('clôture : clotureAfterWork ne regarde que les prompts de la branche courante', () => {
   const twoBranches = parseDecoupage(
     decoupageText().replace('## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-essai', '## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-suite'),
@@ -439,7 +536,7 @@ test('ordre : un prompt exige que tous les précédents soient committés sur la
 });
 
 test('ordre : en mode Conductor, blocked (3) avec la raison et le commit_message du prompt demandé', () => {
-  const { json, exitCode, stdout } = conductor(['T1.1', 'P3'], { subjects: [FIRST_SUBJECT], branch: 'conductor/agent-lot/e1' });
+  const { json, exitCode, stdout } = conductor(['T1.1', 'P3'], { subjects: [FIRST_SUBJECT], branch: 'conductor/agent-lot/T1.1' });
   assert.equal(exitCode, 3);
   assert.equal(json.status, 'blocked');
   assert.match(json.reason, /ORDRE DES PROMPTS/);
@@ -452,7 +549,7 @@ test('reprise : un prompt déjà committé est REFUSÉ (3), il ne part pas avec 
   assert.equal(again.exitCode, 3);
   assert.match(again.stdout, /DÉJÀ FAIT/);
   assert.ok(!again.stdout.includes('## Fichiers'));
-  const viaConductor = conductor(['T1.1', 'P1'], { subjects: [FIRST_SUBJECT], branch: 'conductor/agent-lot/e1' });
+  const viaConductor = conductor(['T1.1', 'P1'], { subjects: [FIRST_SUBJECT], branch: 'conductor/agent-lot/T1.1' });
   assert.equal(viaConductor.exitCode, 3);
   assert.equal(viaConductor.json.status, 'blocked');
   assert.match(viaConductor.json.reason, /déjà committé/);
@@ -473,7 +570,7 @@ test('reprise : --rejouer ne lève pas l’ordre des prompts', () => {
 });
 
 test('reprise : --rejouer est interdit en mode Conductor (error, 2)', () => {
-  const { json, exitCode } = conductor(['T1.1', 'P1', '--rejouer'], { subjects: [FIRST_SUBJECT], branch: 'conductor/agent-lot/e1' });
+  const { json, exitCode } = conductor(['T1.1', 'P1', '--rejouer'], { subjects: [FIRST_SUBJECT], branch: 'conductor/agent-lot/T1.1' });
   assert.equal(exitCode, 2);
   assert.equal(json.status, 'error');
 });
@@ -541,7 +638,7 @@ function writeEvidence(env, content, path = EVIDENCE) {
 }
 
 test('action humaine : preuve absente = action_required (4), payload complet, rien de secret', () => {
-  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/T1.1' });
   const { json, exitCode, stdout } = conductorWith(['T1.1', 'P1'], env);
   assert.equal(exitCode, 4);
   assert.equal(json.status, 'action_required');
@@ -570,7 +667,7 @@ test('action humaine : le code 4 vaut aussi hors --conductor ? non — la porte 
 });
 
 test('action humaine : preuve non vide dans le dépôt = ready', () => {
-  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/T1.1' });
   writeEvidence(env, '| Pages indexées | 0 |\n');
   const { json, exitCode } = conductorWith(['T1.1', 'P1'], env);
   assert.equal(exitCode, 0);
@@ -580,7 +677,7 @@ test('action humaine : preuve non vide dans le dépôt = ready', () => {
 
 test('action humaine : un fichier de preuve VIDE ou fait de blancs ne passe pas', () => {
   for (const content of ['', '   \n\t\n']) {
-    const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+    const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/T1.1' });
     writeEvidence(env, content);
     const { json, exitCode } = conductorWith(['T1.1', 'P1'], env);
     assert.equal(exitCode, 4, JSON.stringify(content));
@@ -590,7 +687,7 @@ test('action humaine : un fichier de preuve VIDE ou fait de blancs ne passe pas'
 });
 
 test('action humaine : un dossier à la place du fichier ne passe pas', () => {
-  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/T1.1' });
   mkdirSync(join(env.repo, EVIDENCE), { recursive: true });
   assert.equal(conductorWith(['T1.1', 'P1'], env).exitCode, 4);
 });
@@ -599,7 +696,7 @@ test('action humaine : un lien symbolique qui sort du dépôt ne passe pas, un l
   const outside = mkdtempSync(join(tmpdir(), 'lot-outside-'));
   tempDirs.push(outside);
   writeFileSync(join(outside, 'secret.md'), 'contenu hors dépôt');
-  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1' });
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/T1.1' });
   const full = join(env.repo, EVIDENCE);
   mkdirSync(join(full, '..'), { recursive: true });
   try {
@@ -618,7 +715,7 @@ test('action humaine : un lien symbolique qui sort du dépôt ne passe pas, un l
 });
 
 test('action humaine : l’ordre des portes — dépendance et date avant l’action, branche avant la preuve', () => {
-  const early = conductor(['T1.1', 'P1'], { lots: [actionLot({ not_before: '2999-01-01T00:00:00+01:00' })], branch: 'conductor/agent-lot/e1' });
+  const early = conductor(['T1.1', 'P1'], { lots: [actionLot({ not_before: '2999-01-01T00:00:00+01:00' })], branch: 'conductor/agent-lot/T1.1' });
   assert.equal(early.json.status, 'too_early');
   const detached = conductor(['T1.1', 'P1'], { lots: [actionLot()], branch: '' });
   assert.equal(detached.json.status, 'blocked');
@@ -626,7 +723,7 @@ test('action humaine : l’ordre des portes — dépendance et date avant l’ac
 });
 
 test('action humaine : le prompt suivant sans action déclarée n’est pas arrêté', () => {
-  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/e1', subjects: [FIRST_SUBJECT] });
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/T1.1', subjects: [FIRST_SUBJECT] });
   assert.equal(conductorWith(['T1.1', 'P2'], env).json.status, 'ready');
 });
 
@@ -735,7 +832,7 @@ test('statuts : seul ready (ou waiting daté et échu) laisse partir un lot', ()
 
 test('statuts : chaque statut bloquant donne blocked (3) en mode Conductor, avec la raison', () => {
   for (const status of ['done', 'partial', 'decision', 'backlog', 'waiting']) {
-    const { json, exitCode } = conductor(['T1.1', 'P1'], { lots: [lotFixture({ status })], branch: 'conductor/agent-lot/e1' });
+    const { json, exitCode } = conductor(['T1.1', 'P1'], { lots: [lotFixture({ status })], branch: 'conductor/agent-lot/T1.1' });
     assert.equal(exitCode, 3, status);
     assert.equal(json.status, 'blocked', status);
     assert.ok(json.reason.length > 5);
@@ -761,13 +858,13 @@ test('dépendances : tous les états sont rapportés, seul done lève le verrou,
 
 test('dépendances : une dépendance ouverte bloque même un lot ready, et la raison la nomme', () => {
   const lots = [lotFixture({ depends: ['T0.1'] }), lotFixture({ id: 'T0.1', status: 'ready', asana_task_id: 'a0', execution: undefined, branch: undefined })];
-  const { json, exitCode, stdout } = conductor(['T1.1', 'P1'], { lots, branch: 'conductor/agent-lot/e1' });
+  const { json, exitCode, stdout } = conductor(['T1.1', 'P1'], { lots, branch: 'conductor/agent-lot/T1.1' });
   assert.equal(exitCode, 3);
   assert.equal(json.status, 'blocked');
   assert.match(json.reason, /T0\.1 \(ready\)/);
   assert.match(stdout, /PAS PRÊT/);
   const closed = [lotFixture({ depends: ['T0.1'] }), lotFixture({ id: 'T0.1', status: 'done', asana_task_id: 'a0', execution: undefined, branch: undefined })];
-  assert.equal(conductor(['T1.1', 'P1'], { lots: closed, branch: 'conductor/agent-lot/e1' }).json.status, 'ready');
+  assert.equal(conductor(['T1.1', 'P1'], { lots: closed, branch: 'conductor/agent-lot/T1.1' }).json.status, 'ready');
 });
 
 // ── Dates : fuseau Europe/Paris, heure d'été et d'hiver ───────────────────────────────────────
@@ -819,7 +916,7 @@ test('dates : TROP TÔT est affiché à l’heure de Paris, en été comme en hi
   const early = conductor(['T1.1', 'P1'], { lots: [lotFixture({ status: 'waiting', not_before: '2026-10-26T08:41:00+01:00' })], now: new Date('2026-10-26T07:40:59Z') });
   assert.equal(early.json.status, 'too_early');
   assert.match(early.json.reason, /lundi 26 octobre 2026 à 08:41/);
-  const open = conductor(['T1.1', 'P1'], { lots: [lotFixture({ status: 'waiting', not_before: '2026-10-26T08:41:00+01:00' })], now: new Date('2026-10-26T07:41:00Z'), branch: 'conductor/agent-lot/e1' });
+  const open = conductor(['T1.1', 'P1'], { lots: [lotFixture({ status: 'waiting', not_before: '2026-10-26T08:41:00+01:00' })], now: new Date('2026-10-26T07:41:00Z'), branch: 'conductor/agent-lot/T1.1' });
   assert.equal(open.json.status, 'ready');
 });
 
@@ -847,6 +944,36 @@ test('découpage : accents, ligatures et saisie décomposée (NFD) donnent le m�
   assert.equal(commitMessage(lotFixture(), composed.steps[0], composed.steps[0].prompts[0]), '[T1.1] P1 — Été à l’œuvre — déjà prêt');
 });
 
+test('découpage : « Branche Conductor » est lue à part de « Branche » et doit valoir conductor/agent-lot/<ID>', () => {
+  const withLine = decoupageText().replaceAll('Branche : lot/T1.1-essai', 'Branche : lot/T1.1-essai\nBranche Conductor : conductor/agent-lot/T1.1');
+  const parsed = parseDecoupage(withLine);
+  assert.deepEqual(parsed.steps.map((step) => [step.branch, step.conductorBranch]), [
+    ['lot/T1.1-essai', 'conductor/agent-lot/T1.1'],
+    ['lot/T1.1-essai', 'conductor/agent-lot/T1.1'],
+  ]);
+  assert.equal(parseDecoupage(decoupageText()).steps[0].conductorBranch, null);
+  const decoupeDir = join(fixtureEnv({ decoupes: { 'T1.1': withLine } }).repo, 'decoupe');
+  assert.deepEqual(validatePlan({ statuses: STATUSES, lots: [lotFixture()] }, { decoupeDir }), []);
+  const wrong = withLine.replace('conductor/agent-lot/T1.1', 'conductor/agent-lot/T9.9');
+  const wrongDir = join(fixtureEnv({ decoupes: { 'T1.1': wrong } }).repo, 'decoupe');
+  const errors = validatePlan({ statuses: STATUSES, lots: [lotFixture()] }, { decoupeDir: wrongDir });
+  assert.ok(errors.some((message) => message.includes('« Branche Conductor » de l\'étape 1 = conductor/agent-lot/T9.9')), errors.join(' | '));
+});
+
+test('plan réel : S2.1 et S2.2 annoncent la branche Conductor unique et gardent la branche manuelle', () => {
+  const plan = loadPlan();
+  const all = lotMap(plan);
+  for (const id of ['S2.1', 'S2.2']) {
+    const parsed = parseDecoupage(readFileSync(new URL(`../docs/pilotage/decoupe/${id}.md`, import.meta.url), 'utf8'));
+    assert.ok(parsed.steps.length > 0);
+    for (const step of parsed.steps) {
+      assert.equal(step.conductorBranch, conductorBranch(id), `${id} étape ${step.number}`);
+      assert.equal(step.branch, all.get(id).branch, `${id} étape ${step.number}`);
+      assert.ok(step.branch.startsWith(`lot/${id}-`));
+    }
+  }
+});
+
 test('découpage : en-tête manquant, ligne d’en-tête invalide et lot sans étape', () => {
   assert.throws(() => parseDecoupage('# sans en-tête\n'), /en-tête YAML manquant/);
   assert.throws(() => parseDecoupage('---\nlot T1.1\n---\n'), /ligne d'en-tête invalide/);
@@ -856,7 +983,7 @@ test('découpage : en-tête manquant, ligne d’en-tête invalide et lot sans é
 test('découpage : un prompt absent est inconnu (2) ; un lot sans prompt connu ne part pas', () => {
   assert.equal(plain(['T1.1', 'P4']).exitCode, 2);
   assert.match(plain(['T1.1', 'P4']).stderr, /Prompt inconnu : T1\.1 P4/);
-  assert.equal(conductor(['T1.1', 'P4'], { branch: 'conductor/agent-lot/e1' }).json.status, 'error');
+  assert.equal(conductor(['T1.1', 'P4'], { branch: 'conductor/agent-lot/T1.1' }).json.status, 'error');
   const sansPrompt = decoupageText().replace(/### P3[\s\S]*$/, '');
   assert.deepEqual(parseDecoupage(sansPrompt).steps.at(-1).prompts, []);
   assert.equal(plain(['T1.1', 'P3'], { decoupes: { 'T1.1': sansPrompt } }).exitCode, 2);
@@ -904,7 +1031,7 @@ test('plan : un lot Conductor exige branche, prompts valides et découpage', () 
 
 test('plan : un lot Conductor non listé dans execution.prompts est refusé (blocked)', () => {
   const lots = [lotFixture({ execution: { mode: 'conductor-agent-lot', prompts: ['P1'] } })];
-  const { json } = conductor(['T1.1', 'P2'], { lots, branch: 'conductor/agent-lot/e1', subjects: [FIRST_SUBJECT] });
+  const { json } = conductor(['T1.1', 'P2'], { lots, branch: 'conductor/agent-lot/T1.1', subjects: [FIRST_SUBJECT] });
   assert.equal(json.status, 'blocked');
   assert.match(json.reason, /n’est pas autorisé dans Conductor/);
 });
@@ -926,7 +1053,7 @@ function gitIn(dir, ...args) {
   return execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-function makeRepo({ lots = [lotFixture()], branch = 'conductor/agent-lot/e1' } = {}) {
+function makeRepo({ lots = [lotFixture()], branch = 'conductor/agent-lot/T1.1' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'lot-repo-'));
   tempDirs.push(dir);
   mkdirSync(join(dir, 'scripts'), { recursive: true });
@@ -956,7 +1083,7 @@ test('CLI réelle : branche conductor/*, prompt prêt, puis P1 refusé une fois 
   const first = cli(dir, ['T1.1', 'P1', '--conductor']);
   assert.equal(first.status, 0, first.stderr);
   assert.equal(first.json.status, 'ready');
-  assert.equal(first.json.branch.current, 'conductor/agent-lot/e1');
+  assert.equal(first.json.branch.current, 'conductor/agent-lot/T1.1');
   writeFileSync(join(dir, 'a.txt'), 'travail');
   gitIn(dir, 'add', 'a.txt');
   gitIn(dir, 'commit', '-q', '-m', first.json.commit_message);
