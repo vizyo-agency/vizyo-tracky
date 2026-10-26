@@ -181,13 +181,28 @@ export function commitMessage(lot, step, prompt) {
  */
 export function completedPrompts(lot, subjects) {
   const result = new Set();
-  const prefix = `[${lot.id}] `;
+  const marker = new RegExp(`\\[${lot.id.replace(/\./g, '\\.')}\\]\\s+(P\\d+)\\s+[—-]`);
   for (const subject of subjects) {
-    if (!subject.startsWith(prefix)) continue;
-    const match = /^(P\d+) — /.exec(subject.slice(prefix.length));
+    const match = marker.exec(subject);
     if (match) result.add(match[1]);
   }
   return result;
+}
+
+function flattenPrompts(decoupage, lot) {
+  const flat = [];
+  for (const step of decoupage?.steps ?? []) {
+    for (const prompt of step.prompts) flat.push({ id: prompt.id, branch: step.branch ?? lot?.branch ?? null });
+  }
+  return flat;
+}
+
+/** Les prompts qui précèdent `promptId` dans le découpage ET se codent sur la même branche. */
+export function promptsBefore(decoupage, lot, promptId) {
+  const flat = flattenPrompts(decoupage, lot);
+  const index = flat.findIndex((candidate) => candidate.id === promptId);
+  if (index < 0) return [];
+  return flat.slice(0, index).filter((candidate) => candidate.branch === flat[index].branch).map((candidate) => candidate.id);
 }
 
 /** Les prompts de la branche qui n'ont pas de commit (clôture). Une étape sans branche vaut pour toutes. */
@@ -414,6 +429,7 @@ function parseArgs(argv) {
     const argument = String(argv[index]);
     if (argument === '--check' && index === 0) options.check = true;
     else if (argument === '--conductor') options.conductor = true;
+    else if (argument === '--rejouer') options.replay = true;
     // Conductor passe encore `--depuis origin/<base>` (versions antérieures au contrat v1) : accepté, sans effet.
     else if (argument === '--depuis') options.since = String(argv[(index += 1)] ?? '');
     else if (argument.startsWith('--')) options.unknown.push(argument);
@@ -489,11 +505,12 @@ export function run(argv = [], env = {}) {
       for (const message of errors) io.error(`- ${message}`);
       return finish('error', EXIT.ERROR, `plan invalide (${errors.length} erreur(s)) : ${errors[0]}`);
     }
-    if (!LOT_ID.test(id)) return usage('Usage : node scripts/lot.mjs <ID> [P<n> | cloture] [--conductor]');
+    if (!LOT_ID.test(id)) return usage('Usage : node scripts/lot.mjs <ID> [P<n> | cloture] [--conductor] [--rejouer]');
     const all = lotMap(plan);
     const lot = all.get(id);
     if (!lot) return usage(`Lot inconnu : ${id}`);
     if (conductorMode) {
+      if (options.replay) return usage('--rejouer est interdit avec --conductor : Conductor tranche sur l’historique git.');
       if (!state.prompt) return usage('Un prompt P1 à P999 est requis avec --conductor.');
       if (state.prompt !== 'cloture' && !PROMPT_ID.test(state.prompt)) return usage(`Prompt invalide : ${options.positional[1]}`);
     }
@@ -575,6 +592,18 @@ export function run(argv = [], env = {}) {
       return finish('blocked', EXIT.BLOCKED, 'MAUVAISE BRANCHE');
     }
 
+    if (done.has(prompt.id) && !options.replay) {
+      const reason = `${prompt.id} est déjà committé sur cette branche (déjà fait) ; ne pas le refaire${conductorMode ? '' : ' (--rejouer pour le reprendre volontairement)'}.`;
+      io.log(`# [${lot.id}] ${prompt.id}\n\n**DÉJÀ FAIT** — ${reason}`);
+      return finish('blocked', EXIT.BLOCKED, reason);
+    }
+    const missing = promptsBefore(decoupage, lot, prompt.id).filter((previous) => !done.has(previous));
+    if (missing.length) {
+      const reason = `ORDRE DES PROMPTS — ${prompt.id} exige d’abord ${missing.join(', ')} (commit « [${lot.id}] P<n> — … » absent de la branche).`;
+      io.log(`# [${lot.id}] ${prompt.id}\n\n**${reason}**`);
+      return finish('blocked', EXIT.BLOCKED, reason);
+    }
+
     if (conductorMode) {
       const conductor = conductorGate(lot, prompt.id, decoupage, evidenceOf);
       if (!conductor.ready) {
@@ -597,7 +626,7 @@ export function run(argv = [], env = {}) {
       io.log('- Commiter avec le message exact, mais ne pas pousser, ouvrir de PR ou déployer.');
       io.log('- Rendre le commit à Conductor : la plateforme proposera le push à la validation humaine.');
     }
-    if (done.has(prompt.id)) io.log(`\n⚠️ ${prompt.id} a déjà un commit.`);
+    if (done.has(prompt.id)) io.log(`\n⚠️ ${prompt.id} a déjà un commit (--rejouer).`);
     for (const [title, values] of [['Fichiers', prompt.files], ['Sources', prompt.sources], ['Faire', prompt.actions]]) {
       io.log(`\n## ${title}`);
       for (const value of values) io.log(`- ${value}`);

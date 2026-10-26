@@ -17,6 +17,7 @@ import {
   loadPlan,
   lotMap,
   parseDecoupage,
+  promptsBefore,
   run,
   statusGate,
   validatePlan,
@@ -413,6 +414,85 @@ test('clôture : clotureAfterWork ne regarde que les prompts de la branche coura
   assert.equal(clotureAfterWork({ ...lot, status: 'ready' }, twoBranches, 'lot/T1.1-essai', new Set(['P1', 'P2'])), false);
   assert.equal(clotureAfterWork(lot, twoBranches, '', new Set(['P1', 'P2'])), false);
   assert.equal(clotureAfterWork(lot, null, 'lot/T1.1-essai', new Set()), false);
+});
+
+// ── Ordre et reprise des prompts ──────────────────────────────────────────────────────────────
+test('ordre : un prompt exige que tous les précédents soient committés sur la branche', () => {
+  const noHistory = plain(['T1.1', 'P2']);
+  assert.equal(noHistory.exitCode, 3);
+  assert.match(noHistory.stdout, /ORDRE DES PROMPTS — P2 exige d’abord P1/);
+  const skipped = plain(['T1.1', 'P3'], { subjects: [FIRST_SUBJECT] });
+  assert.equal(skipped.exitCode, 3);
+  assert.match(skipped.stdout, /P3 exige d’abord P2/);
+  const both = plain(['T1.1', 'P3']);
+  assert.match(both.stdout, /P3 exige d’abord P1, P2/);
+  assert.equal(plain(['T1.1', 'P2'], { subjects: [FIRST_SUBJECT] }).exitCode, 0);
+  assert.equal(plain(['T1.1', 'P3'], { subjects: [SECOND_SUBJECT, FIRST_SUBJECT] }).exitCode, 0);
+  assert.equal(plain(['T1.1', 'P1']).exitCode, 0);
+});
+
+test('ordre : en mode Conductor, blocked (3) avec la raison et le commit_message du prompt demandé', () => {
+  const { json, exitCode, stdout } = conductor(['T1.1', 'P3'], { subjects: [FIRST_SUBJECT], branch: 'conductor/agent-lot/e1' });
+  assert.equal(exitCode, 3);
+  assert.equal(json.status, 'blocked');
+  assert.match(json.reason, /ORDRE DES PROMPTS/);
+  assert.equal(json.commit_message, THIRD_SUBJECT);
+  assert.ok(!stdout.includes('## Fichiers'));
+});
+
+test('reprise : un prompt déjà committé est REFUSÉ (3), il ne part pas avec un simple avertissement', () => {
+  const again = plain(['T1.1', 'P1'], { subjects: [FIRST_SUBJECT] });
+  assert.equal(again.exitCode, 3);
+  assert.match(again.stdout, /DÉJÀ FAIT/);
+  assert.ok(!again.stdout.includes('## Fichiers'));
+  const viaConductor = conductor(['T1.1', 'P1'], { subjects: [FIRST_SUBJECT], branch: 'conductor/agent-lot/e1' });
+  assert.equal(viaConductor.exitCode, 3);
+  assert.equal(viaConductor.json.status, 'blocked');
+  assert.match(viaConductor.json.reason, /déjà committé/);
+  assert.equal(viaConductor.json.commit_message, FIRST_SUBJECT);
+});
+
+test('reprise : --rejouer reprend volontairement un prompt committé, avec avertissement', () => {
+  const replay = plain(['T1.1', 'P1', '--rejouer'], { subjects: [FIRST_SUBJECT] });
+  assert.equal(replay.exitCode, 0);
+  assert.match(replay.stdout, /a déjà un commit \(--rejouer\)/);
+  assert.match(replay.stdout, /## Commit\n\[T1\.1\] P1/);
+});
+
+test('reprise : --rejouer ne lève pas l’ordre des prompts', () => {
+  const stillBlocked = plain(['T1.1', 'P3', '--rejouer'], { subjects: [THIRD_SUBJECT] });
+  assert.equal(stillBlocked.exitCode, 3);
+  assert.match(stillBlocked.stdout, /ORDRE DES PROMPTS/);
+});
+
+test('reprise : --rejouer est interdit en mode Conductor (error, 2)', () => {
+  const { json, exitCode } = conductor(['T1.1', 'P1', '--rejouer'], { subjects: [FIRST_SUBJECT], branch: 'conductor/agent-lot/e1' });
+  assert.equal(exitCode, 2);
+  assert.equal(json.status, 'error');
+});
+
+test('historique : completedPrompts reconnaît un préfixe, jamais un autre lot ni un identifiant voisin', () => {
+  const lot = lotFixture();
+  const done = completedPrompts(lot, [
+    'contrat: [T1.1] P1 — repris par un développeur',
+    '[T1.1] P2 - tiret simple',
+    '[T1.11] P3 — autre lot',
+    '[T1x1] P4 — pas le même identifiant',
+    '[T1.1] P5 sans tiret',
+    'Revert "[T1.1] P6" sans séparateur',
+    'autre commit',
+  ]);
+  assert.deepEqual([...done].sort(), ['P1', 'P2']);
+});
+
+test('ordre : promptsBefore ignore les prompts d’une autre branche et suit l’ordre du découpage', () => {
+  const split = parseDecoupage(decoupageText().replace('## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-essai', '## Étape 2 · Fin\nResponsable : Alice\nBranche : lot/T1.1-suite'));
+  const lot = lotFixture();
+  assert.deepEqual(promptsBefore(split, lot, 'P1'), []);
+  assert.deepEqual(promptsBefore(split, lot, 'P2'), ['P1']);
+  assert.deepEqual(promptsBefore(split, lot, 'P3'), []);
+  assert.deepEqual(promptsBefore(parseDecoupage(decoupageText()), lot, 'P3'), ['P1', 'P2']);
+  assert.deepEqual(promptsBefore(parseDecoupage(decoupageText()), lot, 'P9'), []);
 });
 
 // ═════ Tests couplés au plan réel (remplacés par le commit « tests sur fixtures ») ═════
