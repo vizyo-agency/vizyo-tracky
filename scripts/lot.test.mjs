@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test, { after } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   ACCEPTED_BRANCHES,
   EXIT,
+  HUMAN_ACTION_TYPES,
   classifyBranch,
   clotureAfterWork,
   commitMessage,
@@ -14,6 +17,7 @@ import {
   dateGate,
   dependenciesReady,
   dependencyStates,
+  formatDate,
   inspectEvidence,
   loadPlan,
   lotMap,
@@ -560,7 +564,7 @@ test('action humaine : preuve absente = action_required (4), payload complet, ri
   assert.ok(!/\*\*PRÊT\*\*/.test(stdout), 'le brief ne doit pas dire PRÊT quand une action est requise');
 });
 
-test('action humaine : hors --conductor, la porte de preuve ne s’applique pas', () => {
+test('action humaine : le code 4 vaut aussi hors --conductor ? non — la porte ne s’applique qu’en mode Conductor', () => {
   const env = fixtureEnv({ lots: [actionLot()] });
   assert.equal(run(['T1.1', 'P1'], env).exitCode, 0);
 });
@@ -714,64 +718,304 @@ test('dates : un not_before invalide donne une erreur propre (2), jamais une tra
   assert.match(gate.invalid, /not_before invalide/);
 });
 
-// ═════ Tests couplés au plan réel (remplacés par le commit « tests sur fixtures ») ═════
-const plan = loadPlan();
-const all = lotMap(plan);
-
-test('le plan complet est valide', () => {
-  assert.deepEqual(validatePlan(plan), []);
+// ── Statuts, dépendances ──────────────────────────────────────────────────────────────────────
+test('statuts : seul ready (ou waiting daté et échu) laisse partir un lot', () => {
+  const open = { ready: true, date: null };
+  assert.equal(statusGate(lotFixture({ status: 'ready' }), open).ready, true);
+  assert.equal(statusGate(lotFixture({ status: 'waiting', not_before: '2026-05-01T09:00:00+02:00' }), open).ready, true);
+  assert.equal(statusGate(lotFixture({ status: 'waiting', not_before: '2026-05-01T09:00:00+02:00' }), { ready: false }).ready, false);
+  const expected = { done: /TERMINÉ/, partial: /PARTIEL/, decision: /DÉCISION REQUISE/, backlog: /BACKLOG/, waiting: /EN ATTENTE/ };
+  for (const [status, pattern] of Object.entries(expected)) {
+    const verdict = statusGate(lotFixture({ status }), open);
+    assert.equal(verdict.ready, false, status);
+    assert.match(verdict.reason, pattern);
+  }
+  assert.match(statusGate(lotFixture({ status: 'inconnu' }), open).reason, /STATUT BLOQUANT/);
 });
-test('S2.2 reste bloqué tant que S2.1 n’est pas clos', () => {
-  const states = dependencyStates(all.get('S2.2'), all);
-  assert.equal(states[0].id, 'S2.1');
+
+test('statuts : chaque statut bloquant donne blocked (3) en mode Conductor, avec la raison', () => {
+  for (const status of ['done', 'partial', 'decision', 'backlog', 'waiting']) {
+    const { json, exitCode } = conductor(['T1.1', 'P1'], { lots: [lotFixture({ status })], branch: 'conductor/agent-lot/e1' });
+    assert.equal(exitCode, 3, status);
+    assert.equal(json.status, 'blocked', status);
+    assert.ok(json.reason.length > 5);
+  }
+});
+
+test('dépendances : tous les états sont rapportés, seul done lève le verrou, une inconnue bloque', () => {
+  const all = lotMap({
+    lots: [
+      lotFixture({ id: 'T0.1', status: 'done' }),
+      lotFixture({ id: 'T0.2', status: 'ready' }),
+      lotFixture({ id: 'T0.3', status: 'partial' }),
+      lotFixture({ id: 'T1.1', depends: ['T0.1', 'T0.2', 'T0.9'] }),
+    ],
+  });
+  const states = dependencyStates(all.get('T1.1'), all);
+  assert.deepEqual(states.map(({ id, status }) => [id, status]), [['T0.1', 'done'], ['T0.2', 'ready'], ['T0.9', 'unknown']]);
   assert.equal(dependenciesReady(states), false);
+  assert.equal(dependenciesReady(states.filter(({ id }) => id === 'T0.1')), true);
+  assert.equal(dependenciesReady([]), true);
+  assert.equal(dependenciesReady([{ id: 'x', status: 'partial' }]), false);
 });
 
-test('la date minimale de S2.1 est un verrou réel', () => {
-  const lot = all.get('S2.1');
+test('dépendances : une dépendance ouverte bloque même un lot ready, et la raison la nomme', () => {
+  const lots = [lotFixture({ depends: ['T0.1'] }), lotFixture({ id: 'T0.1', status: 'ready', asana_task_id: 'a0', execution: undefined, branch: undefined })];
+  const { json, exitCode, stdout } = conductor(['T1.1', 'P1'], { lots, branch: 'conductor/agent-lot/e1' });
+  assert.equal(exitCode, 3);
+  assert.equal(json.status, 'blocked');
+  assert.match(json.reason, /T0\.1 \(ready\)/);
+  assert.match(stdout, /PAS PRÊT/);
+  const closed = [lotFixture({ depends: ['T0.1'] }), lotFixture({ id: 'T0.1', status: 'done', asana_task_id: 'a0', execution: undefined, branch: undefined })];
+  assert.equal(conductor(['T1.1', 'P1'], { lots: closed, branch: 'conductor/agent-lot/e1' }).json.status, 'ready');
+});
+
+// ── Dates : fuseau Europe/Paris, heure d'été et d'hiver ───────────────────────────────────────
+test('dates : le verrou 26/10 08:41 Paris (heure d’hiver, +01:00) s’ouvre à 07:41:00Z exactement', () => {
+  const lot = lotFixture({ status: 'waiting', not_before: '2026-10-26T08:41:00+01:00' });
   assert.equal(dateGate(lot, new Date('2026-10-26T07:40:59Z')).ready, false);
   assert.equal(dateGate(lot, new Date('2026-10-26T07:41:00Z')).ready, true);
   assert.equal(statusGate(lot, dateGate(lot, new Date('2026-10-26T07:41:00Z'))).ready, true);
+  assert.equal(statusGate(lot, dateGate(lot, new Date('2026-10-26T07:40:59Z'))).ready, false);
 });
 
-test('un backlog ou un lot terminé ne peut pas partir par accident', () => {
-  assert.equal(statusGate(all.get('B0.2'), { ready: true }).ready, false);
-  assert.equal(statusGate(all.get('P6.5'), { ready: true }).ready, false);
-  assert.equal(statusGate(all.get('S2.2'), { ready: true }).ready, true);
+test('dates : le même 08:41 Paris en heure d’été (+02:00) s’ouvre à 06:41:00Z', () => {
+  const lot = lotFixture({ status: 'waiting', not_before: '2026-07-01T08:41:00+02:00' });
+  assert.equal(dateGate(lot, new Date('2026-07-01T06:40:59Z')).ready, false);
+  assert.equal(dateGate(lot, new Date('2026-07-01T06:41:00Z')).ready, true);
 });
 
-test('Conductor distingue action humaine, prompt dépôt et clôture', () => {
-  const s21 = parseDecoupage(readFileSync(join(process.cwd(), 'docs', 'pilotage', 'decoupe', 'S2.1.md'), 'utf8'));
-  const s22 = parseDecoupage(readFileSync(join(process.cwd(), 'docs', 'pilotage', 'decoupe', 'S2.2.md'), 'utf8'));
-  const action = conductorGate(all.get('S2.1'), 'P1', s21, () => false);
-  assert.equal(action.ready, false);
-  assert.equal(action.actionRequired, true);
-  assert.equal(action.action.id, 'S2.1-A1');
-  assert.equal(conductorGate(all.get('S2.1'), 'P1', s21, () => true).ready, true);
-  assert.equal(conductorGate(all.get('S2.2'), 'P1', s22).ready, true);
-  assert.equal(conductorGate(all.get('S2.2'), 'P99', s22).ready, false);
-  assert.equal(conductorGate(all.get('S2.2'), 'CLOTURE', s22).ready, false);
+test('dates : changement d’heure — 29/03 (été) et 25/10 (hiver) se lisent par leur décalage explicite', () => {
+  const spring = parseNotBefore('2026-03-29T03:00:00+02:00');
+  assert.equal(spring.toISOString(), '2026-03-29T01:00:00.000Z');
+  assert.equal(parseNotBefore('2026-03-29T01:59:00+01:00').getTime() + 60_000, spring.getTime());
+  const autumnFirst = parseNotBefore('2026-10-25T02:30:00+02:00');
+  const autumnSecond = parseNotBefore('2026-10-25T02:30:00+01:00');
+  assert.equal(autumnSecond.getTime() - autumnFirst.getTime(), 3_600_000);
 });
 
-test('un futur lot découpé est compatible sans liste blanche dédiée', () => {
-  const decoupage = {
-    steps: [{ prompts: [{ id: 'P1' }] }],
-  };
-  assert.equal(conductorGate({ id: 'B0.6', execution: {} }, 'P1', decoupage).ready, true);
+test('dates : le décalage du not_before décale le verrou (un fuseau d’écart = une heure)', () => {
+  const now = new Date('2026-10-26T07:41:00Z');
+  const paris = lotFixture({ status: 'waiting', not_before: '2026-10-26T08:41:00+01:00' });
+  const sameInstant = lotFixture({ status: 'waiting', not_before: '2026-10-26T07:41:00Z' });
+  const oneHourLater = lotFixture({ status: 'waiting', not_before: '2026-10-26T08:41:00Z' });
+  const summerOffset = lotFixture({ status: 'waiting', not_before: '2026-10-26T08:41:00+02:00' });
+  assert.equal(dateGate(paris, now).ready, true);
+  assert.equal(dateGate(sameInstant, now).ready, true);
+  assert.equal(dateGate(oneHourLater, now).ready, false);
+  assert.equal(dateGate(oneHourLater, new Date('2026-10-26T08:41:00Z')).ready, true);
+  // +02:00 au lieu de +01:00 : le même « 08:41 » s'ouvre une heure plus tôt (06:41Z).
+  assert.equal(dateGate(summerOffset, new Date('2026-10-26T06:40:59Z')).ready, false);
+  assert.equal(dateGate(summerOffset, new Date('2026-10-26T06:41:00Z')).ready, true);
+  assert.equal(dateGate(summerOffset, now).ready, true);
+  assert.equal(dateGate(lotFixture(), now).ready, true);
+  assert.equal(dateGate(lotFixture(), now).date, null);
 });
 
-test('le découpage S2.2 expose quatre prompts complets', () => {
-  const path = join(process.cwd(), 'docs', 'pilotage', 'decoupe', 'S2.2.md');
-  const parsed = parseDecoupage(readFileSync(path, 'utf8'));
-  const prompts = parsed.steps.flatMap((step) => step.prompts);
-  assert.deepEqual(prompts.map((prompt) => prompt.id), ['P1', 'P2', 'P3', 'P4']);
-  assert.equal(commitMessage(all.get('S2.2'), parsed.steps[0], prompts[0]), '[S2.2] P1 — Retirer la promotion expirée sans inventer une nouvelle offre');
+test('dates : TROP TÔT est affiché à l’heure de Paris, en été comme en hiver', () => {
+  assert.match(formatDate(new Date('2026-10-26T07:41:00Z')), /08:41/);
+  assert.match(formatDate(new Date('2026-07-01T06:41:00Z')), /08:41/);
+  assert.match(formatDate(new Date('2026-10-26T07:41:00Z')), /lundi 26 octobre 2026/);
+  const early = conductor(['T1.1', 'P1'], { lots: [lotFixture({ status: 'waiting', not_before: '2026-10-26T08:41:00+01:00' })], now: new Date('2026-10-26T07:40:59Z') });
+  assert.equal(early.json.status, 'too_early');
+  assert.match(early.json.reason, /lundi 26 octobre 2026 à 08:41/);
+  const open = conductor(['T1.1', 'P1'], { lots: [lotFixture({ status: 'waiting', not_before: '2026-10-26T08:41:00+01:00' })], now: new Date('2026-10-26T07:41:00Z'), branch: 'conductor/agent-lot/e1' });
+  assert.equal(open.json.status, 'ready');
 });
 
-test('les commits exacts déterminent les prompts faits', () => {
-  const done = completedPrompts(all.get('S2.2'), [
-    '[S2.2] P1 — Retirer la promotion expirée sans inventer une nouvelle offre',
-    'autre commit',
-  ]);
-  assert.deepEqual([...done], ['P1']);
+// ── parseDecoupage ────────────────────────────────────────────────────────────────────────────
+test('découpage : la structure est la même en LF et en CRLF', () => {
+  const lf = parseDecoupage(decoupageText());
+  const crlf = parseDecoupage(decoupageText({ eol: '\r\n' }));
+  assert.deepEqual(crlf, lf);
+  assert.deepEqual(lf.steps.flatMap((step) => step.prompts.map((prompt) => prompt.id)), ['P1', 'P2', 'P3']);
+  assert.equal(lf.steps[0].branch, 'lot/T1.1-essai');
+  assert.equal(lf.steps[0].responsible, 'Alice');
+  assert.deepEqual(lf.steps[0].prompts[0].files, ['a.txt', 'b.txt']);
+  assert.deepEqual(lf.steps[0].prompts[0].actions, ['geste 1']);
+  assert.equal(lf.steps[0].prompts[0].duration, 20);
+  assert.equal(lf.steps[0].prompts[0].test, '`node -v`');
+  assert.equal(lf.etat_au, '2026-06-01');
 });
+
+test('découpage : accents, ligatures et saisie décomposée (NFD) donnent le même résultat', () => {
+  const text = decoupageText().replace('Premier prompt', 'Été à l’œuvre — déjà prêt');
+  const composed = parseDecoupage(text.normalize('NFC'));
+  const decomposed = parseDecoupage(text.normalize('NFD'));
+  assert.equal(composed.steps[0].prompts[0].title, 'Été à l’œuvre — déjà prêt');
+  assert.deepEqual(decomposed, composed);
+  assert.equal(commitMessage(lotFixture(), composed.steps[0], composed.steps[0].prompts[0]), '[T1.1] P1 — Été à l’œuvre — déjà prêt');
+});
+
+test('découpage : en-tête manquant, ligne d’en-tête invalide et lot sans étape', () => {
+  assert.throws(() => parseDecoupage('# sans en-tête\n'), /en-tête YAML manquant/);
+  assert.throws(() => parseDecoupage('---\nlot T1.1\n---\n'), /ligne d'en-tête invalide/);
+  assert.deepEqual(parseDecoupage('---\nlot: T1.1\n---\n\n# vide\n').steps, []);
+});
+
+test('découpage : un prompt absent est inconnu (2) ; un lot sans prompt connu ne part pas', () => {
+  assert.equal(plain(['T1.1', 'P4']).exitCode, 2);
+  assert.match(plain(['T1.1', 'P4']).stderr, /Prompt inconnu : T1\.1 P4/);
+  assert.equal(conductor(['T1.1', 'P4'], { branch: 'conductor/agent-lot/e1' }).json.status, 'error');
+  const sansPrompt = decoupageText().replace(/### P3[\s\S]*$/, '');
+  assert.deepEqual(parseDecoupage(sansPrompt).steps.at(-1).prompts, []);
+  assert.equal(plain(['T1.1', 'P3'], { decoupes: { 'T1.1': sansPrompt } }).exitCode, 2);
+});
+
+test('découpage : la validation signale durée hors bornes, champs vides, prompt dupliqué, en-tête de lot faux', () => {
+  const check = (text) => validatePlan({ statuses: STATUSES, lots: [lotFixture({ execution: undefined })] }, { decoupeDir: join(fixtureEnv({ decoupes: { 'T1.1': text } }).repo, 'decoupe') });
+  assert.deepEqual(check(decoupageText()), []);
+  assert.ok(check(decoupageText().replace('Durée : 20 min', 'Durée : 45 min')).some((message) => /durée hors 15–30 min/.test(message)));
+  assert.ok(check(decoupageText().replace('Fichiers : a.txt · b.txt', 'Fichiers : ')).some((message) => /files vide/.test(message)));
+  assert.ok(check(decoupageText().replace('Hors périmètre : le reste', 'Hors périmètre : ')).some((message) => /out vide/.test(message)));
+  assert.ok(check(decoupageText().replace('### P2', '### P1')).some((message) => /prompt dupliqué P1/.test(message)));
+  assert.ok(check(decoupageText({ lotId: 'T9.9' })).some((message) => /en-tête du découpage = T9\.9/.test(message)));
+  assert.ok(check(decoupageText().replace('Responsable : Alice', 'Branche-seule : x')).some((message) => /responsable manquant/.test(message)));
+});
+
+// ── Validation du plan ────────────────────────────────────────────────────────────────────────
+test('plan : doublons, statut inconnu, done_when vide, dépendance inconnue ou circulaire sur soi-même', () => {
+  const decoupeDir = join(fixtureEnv().repo, 'decoupe');
+  const errors = validatePlan(
+    {
+      statuses: STATUSES,
+      lots: [
+        lotFixture({ id: 'T3.1', execution: undefined, branch: undefined, asana_task_id: 'x' }),
+        lotFixture({ id: 'T3.1', execution: undefined, branch: undefined, asana_task_id: 'x', status: 'zzz', done_when: [], depends: ['T3.1', 'T3.9'] }),
+        lotFixture({ id: 'mauvais', execution: undefined, branch: undefined, asana_task_id: 'y' }),
+      ],
+    },
+    { decoupeDir },
+  );
+  for (const pattern of [/T3\.1: doublon/, /statut zzz inconnu/, /done_when vide/, /dépendance inconnue T3\.9/, /dépend de lui-même/, /tâche Asana dupliquée/, /mauvais: identifiant invalide/]) {
+    assert.ok(errors.some((message) => pattern.test(message)), `${pattern} dans ${errors.join(' | ')}`);
+  }
+});
+
+test('plan : un lot Conductor exige branche, prompts valides et découpage', () => {
+  const decoupeDir = join(fixtureEnv({ decoupes: {} }).repo, 'decoupe');
+  const errors = validatePlan({ statuses: STATUSES, lots: [lotFixture({ branch: undefined, execution: { mode: 'conductor-agent-lot', prompts: ['P1', 'Px'] } })] }, { decoupeDir });
+  for (const pattern of [/branche requise pour Conductor/, /prompt Conductor invalide Px/, /découpage requis pour Conductor/]) {
+    assert.ok(errors.some((message) => pattern.test(message)), String(pattern));
+  }
+  const missingPrompt = validatePlan({ statuses: STATUSES, lots: [lotFixture({ execution: { mode: 'conductor-agent-lot', prompts: ['P1', 'P8'] } })] }, { decoupeDir: join(fixtureEnv().repo, 'decoupe') });
+  assert.ok(missingPrompt.some((message) => /prompt Conductor absent du découpage P8/.test(message)));
+});
+
+test('plan : un lot Conductor non listé dans execution.prompts est refusé (blocked)', () => {
+  const lots = [lotFixture({ execution: { mode: 'conductor-agent-lot', prompts: ['P1'] } })];
+  const { json } = conductor(['T1.1', 'P2'], { lots, branch: 'conductor/agent-lot/e1', subjects: [FIRST_SUBJECT] });
+  assert.equal(json.status, 'blocked');
+  assert.match(json.reason, /n’est pas autorisé dans Conductor/);
+});
+
+test('plan réel : valide, et chaque découpage du dépôt se lit sans erreur', () => {
+  const plan = loadPlan();
+  assert.deepEqual(validatePlan(plan), []);
+  assert.ok(plan.lots.length > 0);
+  for (const lot of plan.lots) {
+    for (const action of lot.execution?.actions ?? []) {
+      assert.equal(validateRelativePath(action.output), null, `${lot.id} ${action.id}`);
+      assert.ok(HUMAN_ACTION_TYPES.includes(action.type), `${lot.id} ${action.id}`);
+    }
+  }
+});
+
+// ── Commandes complètes sur un vrai dépôt git jetable (git réel, processus réel, cwd ≠ racine) ──
+function gitIn(dir, ...args) {
+  return execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+}
+
+function makeRepo({ lots = [lotFixture()], branch = 'conductor/agent-lot/e1' } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'lot-repo-'));
+  tempDirs.push(dir);
+  mkdirSync(join(dir, 'scripts'), { recursive: true });
+  mkdirSync(join(dir, 'docs', 'pilotage', 'decoupe'), { recursive: true });
+  copyFileSync(fileURLToPath(new URL('./lot.mjs', import.meta.url)), join(dir, 'scripts', 'lot.mjs'));
+  writeFileSync(join(dir, 'docs', 'pilotage', 'plan.json'), JSON.stringify({ version: 2, statuses: STATUSES, lots }));
+  writeFileSync(join(dir, 'docs', 'pilotage', 'decoupe', 'T1.1.md'), decoupageText());
+  gitIn(dir, 'init', '-q');
+  gitIn(dir, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  gitIn(dir, 'add', 'scripts/lot.mjs', 'docs/pilotage/plan.json', 'docs/pilotage/decoupe/T1.1.md');
+  gitIn(dir, 'commit', '-q', '-m', 'init');
+  if (branch === 'detached') gitIn(dir, 'checkout', '-q', '--detach');
+  else if (branch !== 'main') gitIn(dir, 'checkout', '-q', '-b', branch);
+  return dir;
+}
+
+function cli(dir, args) {
+  // cwd volontairement différent de la racine du dépôt jetable ; git ne remonte pas au-dessus du dossier jetable.
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: dirname(dir) };
+  const result = spawnSync(process.execPath, [join(dir, 'scripts', 'lot.mjs'), ...args], { cwd: tmpdir(), encoding: 'utf8', env });
+  const last = result.stdout.trimEnd().split('\n').at(-1);
+  return { ...result, json: last.startsWith('CONDUCTOR_RESULT ') ? JSON.parse(last.slice(17)) : null };
+}
+
+test('CLI réelle : branche conductor/*, prompt prêt, puis P1 refusé une fois committé et P2 autorisé', () => {
+  const dir = makeRepo();
+  const first = cli(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.json.status, 'ready');
+  assert.equal(first.json.branch.current, 'conductor/agent-lot/e1');
+  writeFileSync(join(dir, 'a.txt'), 'travail');
+  gitIn(dir, 'add', 'a.txt');
+  gitIn(dir, 'commit', '-q', '-m', first.json.commit_message);
+  const again = cli(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(again.status, 3);
+  assert.match(again.json.reason, /déjà committé/);
+  assert.equal(cli(dir, ['T1.1', 'P3', '--conductor']).status, 3);
+  assert.equal(cli(dir, ['T1.1', 'P2', '--conductor']).json.status, 'ready');
+  assert.equal(cli(dir, ['T1.1', 'P2']).status, 3, 'hors Conductor, la branche du lot reste exigée');
+});
+
+test('CLI réelle : HEAD détaché et main sont refusés, avec la ligne finale', () => {
+  const detached = cli(makeRepo({ branch: 'detached' }), ['T1.1', 'P1', '--conductor']);
+  assert.equal(detached.status, 3);
+  assert.equal(detached.json.status, 'blocked');
+  assert.equal(detached.json.branch.current, null);
+  assert.match(detached.json.reason, /HEAD détaché/);
+  const onMain = cli(makeRepo({ branch: 'main' }), ['T1.1', 'P1', '--conductor']);
+  assert.equal(onMain.status, 3);
+  assert.equal(onMain.json.branch.current, 'main');
+});
+
+test('CLI réelle : clôture sur la branche du lot après les trois prompts, lot passé à done par le dernier', () => {
+  const dir = makeRepo({ branch: 'lot/T1.1-essai' });
+  for (const [index, subject] of [FIRST_SUBJECT, SECOND_SUBJECT, THIRD_SUBJECT].entries()) {
+    writeFileSync(join(dir, `f${index}.txt`), String(index));
+    gitIn(dir, 'add', `f${index}.txt`);
+    gitIn(dir, 'commit', '-q', '-m', subject);
+  }
+  const planFile = join(dir, 'docs', 'pilotage', 'plan.json');
+  const plan = JSON.parse(readFileSync(planFile, 'utf8'));
+  plan.lots[0].status = 'done';
+  writeFileSync(planFile, JSON.stringify(plan));
+  gitIn(dir, 'add', 'docs/pilotage/plan.json');
+  gitIn(dir, 'commit', '-q', '-m', 'unrelated: plan');
+  const closing = cli(dir, ['T1.1', 'cloture']);
+  assert.equal(closing.status, 0, closing.stdout);
+  assert.match(closing.stdout, /PRÊTE/);
+  assert.equal(cli(dir, ['T1.1', 'cloture', '--conductor']).status, 3);
+});
+
+test('CLI réelle : un lot done sans aucun commit de prompt reste TERMINÉ à la clôture', () => {
+  const dir = makeRepo({ lots: [lotFixture({ status: 'done' })], branch: 'lot/T1.1-essai' });
+  const finished = cli(dir, ['T1.1', 'cloture']);
+  assert.equal(finished.status, 3);
+  assert.match(finished.stdout, /TERMINÉ/);
+});
+
+test('CLI réelle : sans git (pas un dépôt) = erreur 2 et ligne finale, pas « aucun commit »', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lot-nogit-'));
+  tempDirs.push(dir);
+  mkdirSync(join(dir, 'scripts'), { recursive: true });
+  mkdirSync(join(dir, 'docs', 'pilotage', 'decoupe'), { recursive: true });
+  copyFileSync(fileURLToPath(new URL('./lot.mjs', import.meta.url)), join(dir, 'scripts', 'lot.mjs'));
+  writeFileSync(join(dir, 'docs', 'pilotage', 'plan.json'), JSON.stringify({ version: 2, statuses: STATUSES, lots: [lotFixture()] }));
+  writeFileSync(join(dir, 'docs', 'pilotage', 'decoupe', 'T1.1.md'), decoupageText());
+  const result = cli(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.status, 'error');
+  assert.match(result.json.reason, /git indisponible/);
+});
+
