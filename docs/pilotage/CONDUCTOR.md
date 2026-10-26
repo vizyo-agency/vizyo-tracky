@@ -82,6 +82,19 @@ worktree de base à HEAD détaché, `--conductor` répond **volontairement** `bl
 node scripts/lot.mjs <LOT_ID> <PROMPT_ID> --conductor     # PROMPT_ID = P1 … P999
 ```
 
+**`--racine <chemin absolu>`** (contrat v1.2 § 1) : la racine du dépôt à lire (plan, découpages, preuves,
+historique git, branche courante) au lieu du dossier parent du script. Conductor exécute ainsi une **copie de
+confiance** de `scripts/lot.mjs` (extraite de `origin/main`, posée hors du worktree de l'agent) avec
+`--racine <worktree de la branche du lot>` : le `scripts/lot.mjs` de la branche de l'agent n'est **jamais**
+exécuté ni importé (ses données, `plan.json` et découpages, restent lues : S2.1 P3 et S2.2 P4 les modifient
+légitimement). Le chemin doit être absolu et être **la racine** d'un dépôt ou worktree git
+(`git rev-parse --show-toplevel` y mène) ; un lien symbolique, une jonction, un sous-dossier, un fichier, un
+dossier hors dépôt ou un chemin relatif donnent `error` (2) avec la ligne finale en mode `--conductor`, sans
+chemin local dans `reason`. L'option se donne au plus une fois, sa valeur est obligatoire (la forme
+`--racine=<chemin>` n'existe pas) ; elle se combine avec `--check` (`--check --racine <chemin>`). Les variables
+`GIT_DIR`, `GIT_WORK_TREE` et voisines héritées de l'environnement sont retirées des `git` lancés, pour qu'un
+processus parent ne détourne pas la lecture vers un autre dépôt. Sans l'option, comportement inchangé.
+
 `cloture` n'est jamais accepté en mode Conductor. La sortie reste lisible par un humain ; la **dernière
 ligne de stdout**, toujours, est `CONDUCTOR_RESULT <json compact>` :
 

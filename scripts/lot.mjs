@@ -1,9 +1,21 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/** Racine PAR DÉFAUT = le dossier parent de `scripts/`. `--racine <chemin>` (contrat v1.2 § 1) la remplace pour toutes les lectures. */
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Variables d'environnement qui redirigent git vers un AUTRE dépôt que le dossier courant : retirées de tous les `git`
+ * lancés ici, pour que « le dépôt lu » soit toujours celui de la racine (et non celui d'un processus parent).
+ */
+const GIT_REDIRECTING_VARIABLES = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX'];
+function gitEnvironment() {
+  const environment = { ...process.env };
+  for (const name of GIT_REDIRECTING_VARIABLES) delete environment[name];
+  return environment;
+}
 
 export const LOT_ID = /^[A-Z]\d\.\d+$/;
 export const PROMPT_ID = /^P\d{1,3}$/;
@@ -472,7 +484,7 @@ export function validatePlan(plan, options = {}) {
  * (exit 2) : lancer `git fetch origin`, jamais deviner un historique.
  */
 export function makeGit(repo = REPO) {
-  const run = (args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 }).trim();
+  const run = (args) => execFileSync('git', args, { cwd: repo, env: gitEnvironment(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 }).trim();
   return {
     branch: () => run(['branch', '--show-current']),
     subjects: () => {
@@ -623,8 +635,46 @@ export function scrubLocalPaths(text, repo = REPO) {
   return result.replace(/(?<![\w.:/-])(?:[A-Za-z]:[\\/]|\\\\|\/(?:Users|home|tmp|var|private|root|mnt|opt|etc|usr|srv|Volumes)\/)[^\s'"`)>\]]*/g, '<chemin local>');
 }
 
+const samePath = (a, b) => (process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b));
+
+/**
+ * `--racine <chemin>` (contrat v1.2 § 1) : le chemin doit être ABSOLU, être lui-même un dossier (pas un lien symbolique ni
+ * une jonction), et être la RACINE d'un dépôt ou worktree git (`git rev-parse --show-toplevel` y mène). Les messages ne
+ * citent jamais le chemin (aucun chemin local dans `reason`). Rend `{ ok, root, reason }`, `root` = chemin canonique.
+ * Ne lit rien d'autre que `git rev-parse` : le contenu du dépôt cible (dont son éventuel `scripts/lot.mjs`) n'est jamais exécuté.
+ */
+export function resolveRoot(value) {
+  const fail = (reason) => ({ ok: false, root: null, reason });
+  if (typeof value !== 'string' || value === '' || value.includes('\0')) return fail('chemin vide ou invalide');
+  if (!isAbsolute(value)) return fail('un chemin absolu est requis');
+  let info;
+  try {
+    info = lstatSync(value);
+  } catch {
+    return fail('dossier introuvable');
+  }
+  if (info.isSymbolicLink()) return fail('un lien symbolique (ou une jonction) n’est pas une racine de dépôt');
+  if (!info.isDirectory()) return fail('ce n’est pas un dossier');
+  let real;
+  let top;
+  try {
+    real = realpathSync.native(value);
+    top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: real, env: gitEnvironment(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch {
+    return fail('ce n’est pas un dépôt git lisible');
+  }
+  let realTop;
+  try {
+    realTop = realpathSync.native(top);
+  } catch {
+    return fail('racine git illisible');
+  }
+  if (!samePath(real, realTop)) return fail('ce n’est pas la racine du dépôt git (sous-dossier ou lien)');
+  return { ok: true, root: real, reason: null };
+}
+
 function parseArgs(argv) {
-  const options = { check: false, conductor: false, replay: false, since: null, positional: [], unknown: [], problems: [] };
+  const options = { check: false, conductor: false, replay: false, since: null, root: null, positional: [], unknown: [], problems: [] };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = String(argv[index]);
     if (argument === '--check' && index === 0) options.check = true;
@@ -640,6 +690,15 @@ function parseArgs(argv) {
         options.since = value;
         index += 1;
       }
+    } else if (argument === '--racine') {
+      // Une seule fois, valeur obligatoire (un chemin absolu ne commence jamais par « - »).
+      const value = index + 1 < argv.length ? String(argv[index + 1]) : '';
+      if (options.root !== null) options.problems.push('--racine ne peut être donné qu’une fois.');
+      else if (value === '' || value.startsWith('-')) options.problems.push('--racine attend un chemin absolu (valeur absente ou commençant par « - »).');
+      else {
+        options.root = value;
+        index += 1;
+      }
     } else if (argument.startsWith('-')) options.unknown.push(argument);
     else options.positional.push(argument);
   }
@@ -651,12 +710,20 @@ function parseArgs(argv) {
  * git et la lecture de la preuve (les tests), le défaut est le poste réel.
  */
 export function run(argv = [], env = {}) {
-  const repo = env.repo ?? REPO;
-  const planPath = env.planPath ?? join(repo, 'docs', 'pilotage', 'plan.json');
-  const decoupeDir = env.decoupeDir ?? join(repo, 'docs', 'pilotage', 'decoupe');
+  // La racine lue (plan, découpages, preuves, git) : `--racine` (résolue plus bas), sinon l'injection des tests, sinon le dossier du script.
+  let repo = env.repo ?? REPO;
+  let planPath;
+  let decoupeDir;
+  let git = null;
+  let evidenceOf;
   const now = env.now ?? new Date();
-  const git = env.git ?? makeGit(repo);
-  const evidenceOf = env.checkEvidence ?? ((path) => inspectEvidence(repo, path));
+  const useRoot = (root) => {
+    repo = root;
+    planPath = env.planPath ?? join(repo, 'docs', 'pilotage', 'plan.json');
+    decoupeDir = env.decoupeDir ?? join(repo, 'docs', 'pilotage', 'decoupe');
+    git = env.git ?? makeGit(repo);
+    evidenceOf = env.checkEvidence ?? ((path) => inspectEvidence(repo, path));
+  };
 
   const out = [];
   const err = [];
@@ -668,10 +735,26 @@ export function run(argv = [], env = {}) {
   const io = { log: (line = '') => out.push(eol(line)), error: (line = '') => err.push(eol(clean(line))) };
   const options = parseArgs(argv);
   const conductorMode = options.conductor;
-  const state = { lot: null, prompt: null, current: null, action: null, commit: null };
+  const state = { lot: null, prompt: null, current: null, currentKnown: false, action: null, commit: null };
+
+  /**
+   * `branch.current` : `null` si et seulement si HEAD est détaché (contrat v1.2 § 4). Sur une sortie précoce (usage, plan
+   * illisible, lot inconnu) la branche n'a pas encore été lue : on la lit ici, au mieux. Seul cas sans réponse : git
+   * indisponible ou `--racine` refusée, donc `status = error`, où `null` veut dire « inconnue » et où Conductor ne lit pas la branche.
+   */
+  const settleCurrent = () => {
+    if (state.currentKnown || git === null) return;
+    state.currentKnown = true;
+    try {
+      state.current = git.branch() || null;
+    } catch {
+      state.current = null;
+    }
+  };
 
   const finish = (status, exitCode, reason = null) => {
     if (conductorMode) {
+      settleCurrent();
       io.log(conductorLine({ status, exit_code: exitCode, lot: state.lot, prompt: state.prompt, reason: reason === null ? null : clean(reason), current: state.current, action: state.action, commit_message: state.commit }));
     }
     return { exitCode, stdout: out.length ? `${out.join('\n')}\n` : '', stderr: err.length ? `${err.join('\n')}\n` : '' };
@@ -693,8 +776,13 @@ export function run(argv = [], env = {}) {
     if (options.unknown.length) return usage(`Option inconnue : ${options.unknown.join(', ')}`);
     if (options.problems.length) return usage(options.problems[0]);
     if (options.positional.length > (options.check ? 0 : 2)) {
-      return usage(`Arguments en trop : ${options.positional.slice(options.check ? 0 : 2).join(' ')} (usage : node scripts/lot.mjs <ID> [P<n> | cloture] [--conductor] [--rejouer])`);
+      return usage(`Arguments en trop : ${options.positional.slice(options.check ? 0 : 2).join(' ')} (usage : node scripts/lot.mjs <ID> [P<n> | cloture] [--conductor] [--rejouer] [--racine <chemin absolu>])`);
     }
+    if (options.root !== null) {
+      const resolved = resolveRoot(options.root);
+      if (!resolved.ok) return usage(`--racine refusée : ${resolved.reason}.`);
+      useRoot(resolved.root);
+    } else useRoot(repo);
 
     let plan;
     try {
@@ -734,6 +822,7 @@ export function run(argv = [], env = {}) {
     }
 
     const g = safeGit(git);
+    state.currentKnown = true;
     if (g.branch !== null) state.current = g.branch || null;
     const currentBranch = g.branch ?? '';
     const done = completedPrompts(lot, g.subjects ?? []);

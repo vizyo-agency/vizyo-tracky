@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test, { after } from 'node:test';
@@ -1501,3 +1501,201 @@ test('CLI réelle : la clôture se lance sur conductor/agent-lot/<ID> une fois l
   assert.equal(cli(dir, ['T1.1', 'cloture', '--conductor']).status, 3, 'jamais depuis Conductor');
 });
 
+
+// ── --racine <chemin> : le dépôt lu n'est pas celui du script (contrat v1.2 § 1, M-C) ───────────
+/** Une copie de `lot.mjs` HORS de tout dépôt (dossier jetable sans git) : c'est la « copie de confiance » de Conductor. */
+let trustedCopyPath = null;
+function trustedCopy() {
+  if (trustedCopyPath) return trustedCopyPath;
+  const dir = mkdtempSync(join(tmpdir(), 'lot-trusted-'));
+  tempDirs.push(dir);
+  trustedCopyPath = join(dir, 'lot.mjs');
+  copyFileSync(fileURLToPath(new URL('./lot.mjs', import.meta.url)), trustedCopyPath);
+  return trustedCopyPath;
+}
+
+/** Lance la copie de confiance avec `--racine <racine>` depuis un cwd sans rapport (le dossier temporaire). */
+function cliRoot(root, args, { env = {}, rootArgument = true } = {}) {
+  const result = spawnSync(process.execPath, [trustedCopy(), ...args, ...(rootArgument ? ['--racine', root] : [])], {
+    cwd: tmpdir(),
+    encoding: 'utf8',
+    env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(root), ...env },
+  });
+  const last = result.stdout.trimEnd().split('\n').at(-1);
+  return { ...result, json: last.startsWith('CONDUCTOR_RESULT ') ? JSON.parse(last.slice(17)) : null };
+}
+
+test('--racine : la copie hors dépôt lit le plan, le découpage, la branche et l’historique de la racine donnée', () => {
+  const dir = makeRepo({ lots: [lotFixture({ title: 'Titre propre à la racine cible' })], branch: 'conductor/agent-lot/T1.1' });
+  const ready = cliRoot(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+  assert.equal(ready.json.status, 'ready');
+  assert.equal(ready.json.branch.current, 'conductor/agent-lot/T1.1');
+  assert.equal(ready.json.commit_message, '[T1.1] P1 — Premier prompt');
+  assert.match(cliRoot(dir, ['T1.1']).stdout, /^# \[T1\.1\] Titre propre à la racine cible$/m, 'le plan lu est celui de la racine');
+  writeFileSync(join(dir, 'docs', 'pilotage', 'decoupe', 'T1.1.md'), decoupageText().replace('- geste 1', '- geste propre à la racine cible'));
+  assert.match(cliRoot(dir, ['T1.1', 'P1', '--conductor']).stdout, /- geste propre à la racine cible/, 'le découpage lu est celui de la racine');
+  commitFile(dir, 'p1.txt', FIRST_SUBJECT);
+  const again = cliRoot(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(again.status, 3);
+  assert.match(again.json.reason, /déjà committé/, 'l’historique git est celui de la racine');
+  assert.equal(cliRoot(dir, ['T1.1', 'P2', '--conductor']).json.status, 'ready');
+  const wrongBranch = makeRepo({ branch: 'conductor/agent-lot/T9.9' });
+  assert.equal(cliRoot(wrongBranch, ['T1.1', 'P1', '--conductor']).json.status, 'blocked', 'la branche lue est celle de la racine');
+  const detached = cliRoot(makeRepo({ branch: 'detached' }), ['T1.1', 'P1', '--conductor']);
+  assert.equal(detached.json.status, 'blocked');
+  assert.equal(detached.json.branch.current, null);
+});
+
+test('--racine : sortie identique à celle du script lancé dans le dépôt (même contrat, mêmes octets)', () => {
+  const scenarios = [
+    ['conductor/agent-lot/T1.1', ['T1.1', 'P1', '--conductor']],
+    ['conductor/agent-lot/T1.1', ['T1.1', 'P2', '--conductor']],
+    ['main', ['T1.1', 'P1', '--conductor']],
+    ['conductor/agent-lot/T1.1', ['T1.1']],
+    ['lot/T1.1-essai', ['T1.1', 'cloture']],
+  ];
+  for (const [branch, args] of scenarios) {
+    const dir = makeRepo({ branch });
+    const inside = cli(dir, args);
+    const outside = cliRoot(dir, args);
+    assert.equal(outside.status, inside.status, args.join(' '));
+    assert.equal(outside.stdout, inside.stdout, args.join(' '));
+    assert.equal(outside.stderr, inside.stderr, args.join(' '));
+  }
+});
+
+test('--racine : la preuve d’une action humaine se cherche dans la racine donnée (action_required puis ready)', () => {
+  const dir = makeRepo({ lots: [actionLot({ not_before: '2026-05-01T09:00:00+02:00' })], branch: 'conductor/agent-lot/T1.1' });
+  const waiting = cliRoot(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(waiting.status, 4, waiting.stdout);
+  assert.equal(waiting.json.status, 'action_required');
+  assert.equal(waiting.json.action.evidence_path, EVIDENCE);
+  mkdirSync(join(dir, 'docs', 'preuve'), { recursive: true });
+  writeFileSync(join(dir, EVIDENCE), 'chiffres relevés\n');
+  assert.equal(cliRoot(dir, ['T1.1', 'P1', '--conductor']).json.status, 'ready');
+});
+
+test('--racine : --check valide le plan et les découpages de la racine donnée', () => {
+  const dir = makeRepo();
+  const good = cliRoot(dir, ['--check']);
+  assert.equal(good.status, 0, good.stdout + good.stderr);
+  assert.match(good.stdout, /OK — 1 lots valides/);
+  writeFileSync(join(dir, 'docs', 'pilotage', 'decoupe', 'T1.1.md'), decoupageText().replace('Durée : 20 min', 'Durée : 99 min'));
+  const bad = cliRoot(dir, ['--check']);
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /durée hors 15–30 min/);
+  assert.ok(!bad.stderr.includes(dir), 'aucun chemin local dans les messages');
+});
+
+test('--racine : le scripts/lot.mjs de la racine cible n’est JAMAIS exécuté ni importé', () => {
+  const dir = makeRepo({ branch: 'conductor/agent-lot/T1.1' });
+  const marker = join(dir, 'EXECUTE.txt');
+  // Un lot.mjs hostile, commité dans la racine cible : s'il tournait ou s'il était importé, il laisserait un témoin.
+  writeFileSync(join(dir, 'scripts', 'lot.mjs'), `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, 'exécuté');\nprocess.stdout.write('CONDUCTOR_RESULT {"version":1,"status":"ready"}\\n');\n`);
+  gitIn(dir, 'add', 'scripts/lot.mjs');
+  gitIn(dir, 'commit', '-q', '-m', 'chore: lot.mjs hostile');
+  const result = cliRoot(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(result.json.status, 'ready');
+  assert.equal(result.json.commit_message, '[T1.1] P1 — Premier prompt', 'la sortie vient de la copie de confiance, pas de la racine cible');
+  assert.equal(readdirSync(dir).includes('EXECUTE.txt'), false, 'le lot.mjs de la racine cible a tourné');
+  // Même chose avec `--check` (qui lit tout le dépôt).
+  assert.equal(cliRoot(dir, ['--check']).status, 0);
+  assert.equal(readdirSync(dir).includes('EXECUTE.txt'), false);
+  // Garde de source : lot.mjs n'importe ni n'exécute rien venant du dépôt lu, et ne lance que git.
+  const source = readFileSync(new URL('./lot.mjs', import.meta.url), 'utf8');
+  assert.ok(!/\bimport\s*\(/.test(source) && !/\brequire\s*\(/.test(source), 'aucun import dynamique');
+  assert.match(source, /^import \{ execFileSync \} from 'node:child_process';$/m, 'seul execFileSync est importé de child_process');
+  const launched = [...source.matchAll(/\bexecFileSync\(\s*([^,)\s]+)/g)].map((match) => match[1]);
+  assert.ok(launched.length >= 2);
+  assert.deepEqual([...new Set(launched)], ["'git'"], 'seul git est lancé');
+});
+
+test('--racine : une variable GIT_DIR héritée ne détourne pas la lecture vers un autre dépôt', () => {
+  const target = makeRepo({ branch: 'conductor/agent-lot/T1.1' });
+  const decoy = makeRepo({ branch: 'conductor/agent-lot/T1.1' });
+  commitFile(decoy, 'p1.txt', FIRST_SUBJECT); // dans le leurre, P1 est déjà fait
+  const result = cliRoot(target, ['T1.1', 'P1', '--conductor'], { env: { GIT_DIR: join(decoy, '.git'), GIT_WORK_TREE: decoy } });
+  assert.equal(result.json.status, 'ready', result.stdout);
+  assert.equal(cliRoot(decoy, ['T1.1', 'P1', '--conductor'], { env: { GIT_DIR: join(target, '.git') } }).json.status, 'blocked');
+});
+
+test('--racine : un worktree lié (.git est un fichier) est une racine valide', () => {
+  const dir = makeRepo({ branch: 'main' });
+  const parent = mkdtempSync(join(tmpdir(), 'lot-wt-'));
+  tempDirs.push(parent);
+  const linked = join(parent, 'wt');
+  gitIn(dir, 'worktree', 'add', '-q', '-b', 'conductor/agent-lot/T1.1', linked);
+  const result = cliRoot(linked, ['T1.1', 'P1', '--conductor']);
+  assert.equal(result.json.status, 'ready', result.stdout + result.stderr);
+  assert.equal(result.json.branch.current, 'conductor/agent-lot/T1.1');
+});
+
+test('--racine : refus propres (exit 2, ligne finale error, jamais de chemin local dans reason ni stderr)', () => {
+  const dir = makeRepo({ branch: 'conductor/agent-lot/T1.1' });
+  const notGit = mkdtempSync(join(tmpdir(), 'lot-plain-'));
+  tempDirs.push(notGit);
+  const cases = {
+    'chemin relatif': 'docs/pilotage',
+    'chemin relatif ./': './',
+    inexistant: join(notGit, 'absent'),
+    'un fichier': join(dir, 'docs', 'pilotage', 'plan.json'),
+    'un sous-dossier du dépôt': join(dir, 'docs'),
+    'un dossier hors dépôt git': notGit,
+  };
+  for (const [label, value] of Object.entries(cases)) {
+    const result = cliRoot(value, ['T1.1', 'P1', '--conductor']);
+    assert.equal(result.status, 2, `${label} : ${result.stdout}${result.stderr}`);
+    assert.equal(result.json.status, 'error', label);
+    assert.equal(result.json.exit_code, 2, label);
+    assert.match(result.json.reason, /^--racine refusée : /, label);
+    const publicText = `${result.json.reason}\n${result.stderr}\n${result.stdout}`;
+    for (const secret of [dir, notGit, tmpdir()]) assert.ok(!publicText.includes(secret), `${label} : chemin local dans la sortie`);
+    assert.equal(result.json.branch.current, null, 'racine refusée : branche inconnue');
+  }
+  // Valeur absente, option répétée, forme --racine=, valeur qui est une option.
+  const malformed = [
+    ['T1.1', 'P1', '--conductor', '--racine'],
+    ['T1.1', 'P1', '--conductor', '--racine', '--rejouer'],
+    ['T1.1', 'P1', '--conductor', '--racine', dir, '--racine', dir],
+    ['T1.1', 'P1', '--conductor', `--racine=${dir}`],
+  ];
+  for (const args of malformed) {
+    const result = cliRoot(dir, args, { rootArgument: false });
+    assert.equal(result.status, 2, args.join(' '));
+    assert.equal(result.json.status, 'error');
+    assert.ok(!`${result.stdout}${result.stderr}`.includes(dir), 'aucun chemin local');
+  }
+});
+
+test('--racine : un lien symbolique (ou une jonction) vers un dépôt n’est pas une racine', (t) => {
+  const dir = makeRepo({ branch: 'conductor/agent-lot/T1.1' });
+  const parent = mkdtempSync(join(tmpdir(), 'lot-link-'));
+  tempDirs.push(parent);
+  const link = join(parent, 'lien');
+  try {
+    symlinkSync(dir, link, 'junction');
+  } catch (error) {
+    t.skip(`lien non créable ici (${error.code})`);
+    return;
+  }
+  const result = cliRoot(link, ['T1.1', 'P1', '--conductor']);
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.json.reason, /lien symbolique/);
+  assert.ok(!`${result.stdout}${result.stderr}`.includes(link));
+});
+
+test('--racine : sans l’option, le comportement est inchangé (racine = parent du dossier du script)', () => {
+  const dir = makeRepo({ branch: 'conductor/agent-lot/T1.1' });
+  const result = cli(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(result.status, 0, result.stdout);
+  assert.equal(result.json.branch.current, 'conductor/agent-lot/T1.1');
+});
+
+test('--racine : en-process, la racine donnée remplace celle du script mais pas les injections des tests', () => {
+  const dir = makeRepo({ branch: 'conductor/agent-lot/T1.1' });
+  const result = run(['T1.1', 'P1', '--conductor', '--racine', dir], { now: NOW });
+  assert.equal(result.exitCode, 0, result.stdout);
+  const injected = run(['T1.1', 'P1', '--conductor', '--racine', dir], { now: NOW, git: { branch: () => 'conductor/agent-lot/T9.9', subjects: () => [] } });
+  assert.equal(injected.exitCode, 3, 'une injection explicite garde la priorité');
+});
