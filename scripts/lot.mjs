@@ -662,7 +662,10 @@ export function run(argv = [], env = {}) {
   const err = [];
   // Aucun chemin absolu local dans une erreur ni dans `reason` (contrat v1.1 § 5) : chemins relatifs au dépôt seulement.
   const clean = (text) => scrubLocalPaths(text, repo);
-  const io = { log: (line = '') => out.push(String(line)), error: (line = '') => err.push(clean(line)) };
+  // Jamais de retour chariot dans la sortie, quelle que soit la fin de ligne des fichiers lus (CRLF) : Conductor lit la
+  // dernière ligne de stdout, un `\r` résiduel la rendrait illisible ou ferait fuiter des fins de ligne Windows.
+  const eol = (text) => String(text).replace(/\r\n?/g, '\n');
+  const io = { log: (line = '') => out.push(eol(line)), error: (line = '') => err.push(eol(clean(line))) };
   const options = parseArgs(argv);
   const conductorMode = options.conductor;
   const state = { lot: null, prompt: null, current: null, action: null, commit: null };

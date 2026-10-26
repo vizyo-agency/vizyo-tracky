@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -9,6 +10,7 @@ import {
   EXIT,
   HUMAN_ACTION_TYPES,
   acceptedBranches,
+  actionPayload,
   classifyBranch,
   clotureAfterWork,
   commitMessage,
@@ -275,10 +277,133 @@ test('contrat : hors --conductor, aucune ligne CONDUCTOR_RESULT et les codes his
   assert.match(check.stdout, /^OK — 1 lots valides\./);
 });
 
-test('contrat : aucune valeur de compte ni de secret n’est ajoutée à la ligne finale', () => {
-  const { stdout } = conductor(['T1.1', 'P1']);
-  const line = stdout.trimEnd().split('\n').at(-1);
-  assert.ok(!/token|secret|password|cookie/i.test(line));
+// Un faux secret « canari » : sa VALEUR ne doit apparaître ni dans stdout, ni dans stderr, ni dans la ligne finale.
+// (Le NOM d'une variable peut apparaître, par exemple dans les interdits d'une action ; jamais sa valeur.)
+const CANARY_NAME = 'LOT_TEST_SECRET_CANARY';
+const canaryValue = () => `canari-${randomUUID()}`;
+
+function withCanaryEnv(value, body) {
+  const previous = process.env[CANARY_NAME];
+  process.env[CANARY_NAME] = value;
+  try {
+    return body();
+  } finally {
+    if (previous === undefined) delete process.env[CANARY_NAME];
+    else process.env[CANARY_NAME] = previous;
+  }
+}
+
+function assertNoCanary(result, canary, label) {
+  assert.ok(!result.stdout.includes(canary), `${label} : le canari fuit dans stdout`);
+  assert.ok(!result.stderr.includes(canary), `${label} : le canari fuit dans stderr`);
+  assert.ok(!(result.json?.reason ?? '').includes(canary), `${label} : le canari fuit dans reason`);
+}
+
+test('secrets : la valeur d’un canari (environnement, dépôt, preuve, historique) n’apparaît dans aucune sortie ni ligne finale', () => {
+  const canary = canaryValue();
+  const guarded = { ...ACTION, forbidden: [`Copier la valeur de ${CANARY_NAME}`], instructions: [`Ne pas lire ${CANARY_NAME}`] };
+  const lots = [actionLot({ execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [guarded] } })];
+  const poisoned = [`chore: ${canary}`, `fix(secret): ${canary}`];
+  withCanaryEnv(canary, () => {
+    const scenarios = {};
+    // action_required : le brief imprime les interdits (le NOM de la variable y figure, pas sa valeur).
+    const actionEnv = fixtureEnv({ lots, branch: 'conductor/agent-lot/T1.1', subjects: poisoned });
+    writeFileSync(join(actionEnv.repo, '.env'), `${CANARY_NAME}=${canary}\n`);
+    scenarios.action_required = conductorWith(['T1.1', 'P1'], actionEnv);
+    // ready : la preuve elle-même contient le canari (contenu jamais recopié).
+    const readyEnv = fixtureEnv({ lots, branch: 'conductor/agent-lot/T1.1', subjects: poisoned });
+    writeFileSync(join(readyEnv.repo, '.env'), `${CANARY_NAME}=${canary}\n`);
+    writeEvidence(readyEnv, `relevé : ${canary}\n`);
+    scenarios.ready = conductorWith(['T1.1', 'P1'], readyEnv);
+    scenarios.blocked_branch = conductorWith(['T1.1', 'P1'], fixtureEnv({ lots, branch: 'main', subjects: poisoned }));
+    scenarios.blocked_order = conductorWith(['T1.1', 'P3'], fixtureEnv({ lots, branch: 'conductor/agent-lot/T1.1', subjects: poisoned }));
+    scenarios.too_early = conductorWith(['T1.1', 'P1'], fixtureEnv({ lots: [actionLot({ not_before: '2999-01-01T00:00:00+01:00' })], branch: 'conductor/agent-lot/T1.1' }));
+    scenarios.error_usage = conductorWith(['T9.9', 'P1'], fixtureEnv({ lots }));
+    const failing = fixtureEnv({ lots, branch: 'conductor/agent-lot/T1.1' });
+    scenarios.error_internal = conductorWith(['T1.1', 'P1'], { ...failing, checkEvidence: () => { throw new Error('échec de lecture'); } });
+    assert.deepEqual(Object.values(scenarios).map(({ json }) => json.status), ['action_required', 'ready', 'blocked', 'blocked', 'too_early', 'error', 'error']);
+    for (const [label, result] of Object.entries(scenarios)) {
+      assertNoCanary(result, canary, label);
+      const last = result.stdout.trimEnd().split('\n').at(-1);
+      assert.ok(last.startsWith('CONDUCTOR_RESULT ') && !last.includes(canary), label);
+    }
+    assert.ok(scenarios.action_required.stdout.includes(CANARY_NAME), 'le NOM de la variable peut figurer dans les interdits');
+    assert.ok(scenarios.action_required.json.action.forbidden[0].includes(CANARY_NAME));
+  });
+});
+
+test('secrets (processus réel) : le canari de l’environnement et du dépôt ne sort pas, ni en ready ni en action_required', () => {
+  const canary = canaryValue();
+  const lots = [actionLot()];
+  const dir = makeRepo({ lots });
+  writeFileSync(join(dir, '.env'), `${CANARY_NAME}=${canary}\n`);
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: dirname(dir), [CANARY_NAME]: canary, GITHUB_TOKEN: canary, ANTHROPIC_API_KEY: canary };
+  const launch = () => spawnSync(process.execPath, [join(dir, 'scripts', 'lot.mjs'), 'T1.1', 'P1', '--conductor'], { cwd: tmpdir(), encoding: 'utf8', env });
+  const pending = launch();
+  assert.equal(pending.status, 4, pending.stdout);
+  writeEvidence({ repo: dir }, `preuve : ${canary}\n`);
+  const ready = launch();
+  assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+  for (const result of [pending, ready]) {
+    assert.ok(!result.stdout.includes(canary) && !result.stderr.includes(canary), 'le canari sort du processus');
+    assert.ok(!/ghp_|sk-ant-|BEGIN [A-Z ]*PRIVATE KEY/.test(result.stdout + result.stderr));
+  }
+});
+
+test('secrets : le payload de l’action réelle S2.1-A1 n’a que les dix clés du contrat, sans donnée de compte', () => {
+  const plan = loadPlan();
+  const lot = lotMap(plan).get('S2.1');
+  const action = lot.execution.actions.find((candidate) => candidate.id === 'S2.1-A1');
+  const payload = actionPayload(lot, action);
+  assert.deepEqual(Object.keys(payload), ['id', 'type', 'responsible', 'url', 'instructions', 'forbidden', 'evidence_path', 'evidence_rule', 'resume_command', 'not_before']);
+  const text = JSON.stringify(payload);
+  // Les mots « cookie » ou « jeton » figurent légitimement dans les INTERDITS ; jamais une valeur.
+  assert.ok(payload.forbidden.some((item) => /cookie/i.test(item)), 'les interdits nomment bien ce qu’il ne faut pas copier');
+  for (const pattern of [/ghp_[A-Za-z0-9]/, /gho_[A-Za-z0-9]/, /github_pat_/, /sk-[A-Za-z0-9]{10}/, /AKIA[0-9A-Z]{12}/, /-----BEGIN/, /eyJ[A-Za-z0-9_-]{20}/, /[\w.+-]+@[\w-]+\.[\w.]+/, /\b\d{1,3}(?:\.\d{1,3}){3}\b/, /(?:password|mot de passe)\s*[:=]\s*\S/i]) {
+    assert.ok(!pattern.test(text), `${pattern} dans le payload de S2.1-A1`);
+  }
+  assert.ok(payload.url.startsWith('https://'));
+  assert.equal(validateRelativePath(payload.evidence_path), null);
+});
+
+test('CRLF : aucune fin de ligne Windows dans la sortie ni la ligne finale, même avec un plan et un découpage CRLF', () => {
+  const eolPlan = (lots) => JSON.stringify({ version: 2, statuses: STATUSES, lots }, null, 2).replaceAll('\n', '\r\n');
+  const lots = [actionLot({ execution: { mode: 'conductor-assisted', prompts: ['P1', 'P2', 'P3'], actions: [{ ...ACTION, instructions: ['ligne un\r\nligne deux', 'ligne trois\r'] }] } })];
+  const env = fixtureEnv({ lots, decoupes: { 'T1.1': decoupageText({ eol: '\r\n' }) }, branch: 'conductor/agent-lot/T1.1' });
+  writeFileSync(env.planPath, eolPlan(lots));
+  const scenarios = {
+    action_required: conductorWith(['T1.1', 'P1'], env),
+    blocked_order: conductorWith(['T1.1', 'P3'], env),
+  };
+  writeEvidence(env, 'preuve\r\n');
+  scenarios.ready = conductorWith(['T1.1', 'P1'], env);
+  assert.deepEqual(Object.values(scenarios).map(({ json }) => json.status), ['action_required', 'blocked', 'ready']);
+  for (const [label, result] of Object.entries(scenarios)) {
+    assert.ok(!result.stdout.includes('\r'), `${label} : « \\r » dans stdout`);
+    assert.ok(!result.stderr.includes('\r'), `${label} : « \\r » dans stderr`);
+    const lines = result.stdout.trimEnd().split('\n');
+    assert.equal(lines.filter((line) => line.startsWith('CONDUCTOR_RESULT ')).length, 1, label);
+    assert.ok(lines.at(-1).startsWith('CONDUCTOR_RESULT '), label);
+    assert.equal(result.json.commit_message.includes('\r'), false, label);
+  }
+  assert.equal(scenarios.ready.json.commit_message, FIRST_SUBJECT);
+  assert.deepEqual(scenarios.action_required.json.action.instructions, ['ligne un\r\nligne deux', 'ligne trois\r'], 'le JSON garde la donnée, échappée');
+  assert.ok(!scenarios.action_required.stdout.split('\n').at(-1).includes('\r'));
+  assert.ok(scenarios.action_required.stdout.includes('- ligne un\nligne deux'), 'l’affichage humain normalise les fins de ligne');
+});
+
+test('CRLF (processus réel) : aucun octet 0x0D sur stdout avec des fichiers CRLF', () => {
+  const dir = makeRepo({ lots: [actionLot()], eol: '\r\n' });
+  writeEvidence({ repo: dir }, 'preuve\r\n');
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: dirname(dir) };
+  for (const args of [['T1.1', 'P1'], ['T1.1', 'P3'], ['T1.1', 'P9']]) {
+    const result = spawnSync(process.execPath, [join(dir, 'scripts', 'lot.mjs'), ...args, '--conductor'], { cwd: tmpdir(), env });
+    assert.ok(!result.stdout.includes(0x0d), `${args.join(' ')} : octet CR dans stdout`);
+    assert.ok(!result.stderr.includes(0x0d), `${args.join(' ')} : octet CR dans stderr`);
+    const last = result.stdout.toString('utf8').trimEnd().split('\n').at(-1);
+    assert.ok(last.startsWith('CONDUCTOR_RESULT '), args.join(' '));
+    assert.equal(JSON.parse(last.slice('CONDUCTOR_RESULT '.length)).exit_code, result.status);
+  }
 });
 
 // ── Branche d'exécution (mode Conductor) ──────────────────────────────────────────────────────
@@ -1192,14 +1317,14 @@ function gitIn(dir, ...args) {
   return execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-function makeRepo({ lots = [lotFixture()], branch = 'conductor/agent-lot/T1.1', origin = true } = {}) {
+function makeRepo({ lots = [lotFixture()], branch = 'conductor/agent-lot/T1.1', origin = true, eol = '\n' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'lot-repo-'));
   tempDirs.push(dir);
   mkdirSync(join(dir, 'scripts'), { recursive: true });
   mkdirSync(join(dir, 'docs', 'pilotage', 'decoupe'), { recursive: true });
   copyFileSync(fileURLToPath(new URL('./lot.mjs', import.meta.url)), join(dir, 'scripts', 'lot.mjs'));
-  writeFileSync(join(dir, 'docs', 'pilotage', 'plan.json'), JSON.stringify({ version: 2, statuses: STATUSES, lots }));
-  writeFileSync(join(dir, 'docs', 'pilotage', 'decoupe', 'T1.1.md'), decoupageText());
+  writeFileSync(join(dir, 'docs', 'pilotage', 'plan.json'), JSON.stringify({ version: 2, statuses: STATUSES, lots }, null, eol === '\n' ? 0 : 2).replaceAll('\n', eol));
+  writeFileSync(join(dir, 'docs', 'pilotage', 'decoupe', 'T1.1.md'), decoupageText({ eol }));
   gitIn(dir, 'init', '-q');
   gitIn(dir, 'symbolic-ref', 'HEAD', 'refs/heads/main');
   gitIn(dir, 'add', 'scripts/lot.mjs', 'docs/pilotage/plan.json', 'docs/pilotage/decoupe/T1.1.md');
