@@ -12,8 +12,8 @@
   un compte personnel ; l'ancienne adresse redirige. OBSERVÉ le 26/10.
 - `main` est protégée : une approbation est requise avant fusion, aucun contrôle automatique n'est exigé
   par la protection, et `enforce_admins` vaut `false` (les administrateurs ne sont pas soumis à la règle).
-  OBSERVÉ le 26/10 par lecture de la protection. Ce dernier réglage est **à trancher par le propriétaire** ;
-  ce dépôt n'affirme rien de plus. Le dépôt n'avait aucun workflow au 25/10 ; la CI minimale du pilotage
+  OBSERVÉ le 26/10 par lecture de la protection. **Décision du propriétaire, 26/10/2026 : `enforce_admins` reste `false`.** Il est seul sur ce dépôt
+  et veut pouvoir fusionner sans relecture ; les fusions se font avec le contournement administrateur (`gh pr merge --admin`). Le dépôt n'avait aucun workflow au 25/10 ; la CI minimale du pilotage
   est décrite dans `.github/workflows/pilotage.yml` (non exigée). OBSERVÉ le 26/10.
 - Pilotage `/lot` sur `main` : la PR n° 139 (squash), puis les correctifs (n° 140) et le découpage de V5.2
   (n° 141) sont **fusionnés**. OBSERVÉ le 26/10 (fusions faites par le propriétaire du dépôt avec contournement
@@ -67,8 +67,9 @@ fusionné dans `main` n'existe pour lui. Dans l'ordre :
    refaite sur la nouvelle `origin/main` avant d'ouvrir sa PR (INFÉRÉ : sans cela, ses commits
    rejouent les changements déjà squashés) ; ce geste est celui du propriétaire, il n'est pas fait ici.
 3. **`enforce_admins` de `main`** vaut `false` (OBSERVÉ le 26/10) : les administrateurs ne sont pas soumis à la
-   règle de protection. À **trancher par le propriétaire** avant d'ouvrir `main` à un flux automatisé ; ce
-   dépôt n'affirme rien de plus.
+   règle de protection. **Tranché par le propriétaire le 26/10/2026** : il reste `false`, le contournement administrateur est la règle sur
+   ce dépôt (propriétaire seul). Conséquence assumée : aucune relecture humaine n'est exigée avant une fusion ; les garde-fous
+   sont le diff relu avant chaque push approuvé, le scan de secrets et la CI de la PR.
 4. Les autres prérequis (App GitHub, workspace, emploi Agent Lot, essai à blanc de la preuve) sont listés
    ci-dessus et restent **à vérifier sur l'instance**.
 
@@ -334,8 +335,8 @@ propriétaire :
   diff et résultat du scan visibles dans la validation avant approbation. **OBSERVÉ le 26/10 sur l'instance
   dev** : la carte de validation montre la plage lue, les fichiers modifiés, le `diff --stat`, le résultat du
   scan (« aucune découverte ») et un extrait du diff.
-- `enforce_admins` de `main` vaut actuellement `false` (OBSERVÉ le 26/10) : à trancher par le propriétaire.
-  Rien de plus n'est affirmé ici sur ses conséquences.
+- `enforce_admins` de `main` vaut `false` (OBSERVÉ le 26/10), par décision du propriétaire (voir ci-dessus) : le dépôt est public,
+  donc le diff de chaque push est relu avant approbation, et aucune fusion ne remplace cette relecture.
 
 ## Secrets
 
