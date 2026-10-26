@@ -12,6 +12,7 @@ import {
   acceptedBranches,
   actionPayload,
   classifyBranch,
+  classifySubject,
   clotureAfterWork,
   commitMessage,
   completedPrompts,
@@ -819,18 +820,19 @@ test('reprise : --rejouer est interdit en mode Conductor (error, 2)', () => {
   assert.equal(json.status, 'error');
 });
 
-test('historique : completedPrompts reconnaît un préfixe, jamais un autre lot ni un identifiant voisin', () => {
+test('historique : completedPrompts ne reconnaît que le sujet ancré, jamais un autre lot ni un identifiant voisin', () => {
   const lot = lotFixture();
   const done = completedPrompts(lot, [
-    'contrat: [T1.1] P1 — repris par un développeur',
-    '[T1.1] P2 - tiret simple',
-    '[T1.11] P3 — autre lot',
-    '[T1x1] P4 — pas le même identifiant',
-    '[T1.1] P5 sans tiret',
-    'Revert "[T1.1] P6" sans séparateur',
+    '[T1.1] P1 — exact',
+    'contrat: [T1.1] P2 — préfixe : plus reconnu (détecteur unique ancré)',
+    '[T1.1] P3 - tiret simple',
+    '[T1.11] P4 — autre lot',
+    '[T1x1] P5 — pas le même identifiant',
+    '[T1.1] P6 sans tiret',
+    'Revert "[T1.1] P7" sans séparateur',
     'autre commit',
   ]);
-  assert.deepEqual([...done].sort(), ['P1', 'P2']);
+  assert.deepEqual([...done].sort(), ['P1']);
 });
 
 test('ordre : promptsBefore ignore les prompts d’une autre branche et suit l’ordre du découpage', () => {
@@ -1444,7 +1446,7 @@ test('historique : « Revert … » ne compte jamais comme prompt fait (unitaire
   const lot = lotFixture();
   assert.deepEqual([...completedPrompts(lot, ['Revert "[T1.1] P1 — Premier prompt"'])], []);
   assert.deepEqual([...completedPrompts(lot, ['Revert [T1.1] P2 — x', FIRST_SUBJECT])], ['P1']);
-  assert.deepEqual([...completedPrompts(lot, ['revert: [T1.1] P3 — minuscule, autre convention'])], ['P3'], 'seul le « Revert » de git est exclu');
+  assert.deepEqual([...completedPrompts(lot, ['revert: [T1.1] P3 — convention « revert: »'])], [], 'ni fait (non ancré), ni annulation');
   const reverted = ['Revert "[T1.1] P1 — Premier prompt"'];
   assert.equal(plain(['T1.1', 'P1'], { subjects: reverted }).exitCode, 0, 'P1 reste à faire');
   const second = plain(['T1.1', 'P2'], { subjects: reverted });
@@ -1463,7 +1465,8 @@ test('historique (git réel) : seuls les commits absents de origin/main comptent
   assert.match(cli(dir, ['T1.1', 'P1', '--conductor']).json.reason, /déjà committé/);
   assert.equal(cli(dir, ['T1.1', 'P2', '--conductor']).json.status, 'ready');
   commitFile(dir, 'c.txt', `Revert "${FIRST_SUBJECT}"`);
-  assert.match(cli(dir, ['T1.1', 'P1', '--conductor']).json.reason, /déjà committé/, 'le commit d’origine compte toujours (limite connue : voir CONDUCTOR.md)');
+  assert.equal(cli(dir, ['T1.1', 'P1', '--conductor']).json.status, 'ready', 'le Revert APRÈS le commit d’origine annule P1 (v1.2 § 2)');
+  assert.match(cli(dir, ['T1.1', 'P2', '--conductor']).json.reason, /ORDRE DES PROMPTS — P2 exige d’abord P1/, 'P1 annulé : P2 attend de nouveau');
   const onlyRevert = makeRepo();
   commitFile(onlyRevert, 'a.txt', `Revert "${FIRST_SUBJECT}"`);
   assert.equal(cli(onlyRevert, ['T1.1', 'P1', '--conductor']).json.status, 'ready');
@@ -1698,4 +1701,134 @@ test('--racine : en-process, la racine donnée remplace celle du script mais pas
   assert.equal(result.exitCode, 0, result.stdout);
   const injected = run(['T1.1', 'P1', '--conductor', '--racine', dir], { now: NOW, git: { branch: () => 'conductor/agent-lot/T9.9', subjects: () => [] } });
   assert.equal(injected.exitCode, 3, 'une injection explicite garde la priorité');
+});
+
+// ── Détecteur « prompt fait » unique (contrat v1.2 § 2) ─────────────────────────────────────────
+test('détecteur : classifySubject — seuls les sujets ancrés `[ID] Pn — ` comptent, sans aucune tolérance', () => {
+  const made = (id, subject) => classifySubject(id, subject);
+  assert.deepEqual(made('S2.1', '[S2.1] P1 — Titre'), { kind: 'prompt', prompt: 'P1' });
+  assert.deepEqual(made('S2.1', '[S2.1] P10 — dix'), { kind: 'prompt', prompt: 'P10' });
+  assert.deepEqual(made('S2.1', '[S2.1] P999 — max'), { kind: 'prompt', prompt: 'P999' });
+  assert.deepEqual(made('S2.10', '[S2.10] P1 — autre lot'), { kind: 'prompt', prompt: 'P1' });
+  assert.deepEqual(made('S12.34', '[S12.34] P2 — deux chiffres'), { kind: 'prompt', prompt: 'P2' });
+  const rejected = [
+    '[S2.1] P1 - tiret simple',
+    '[S2.1] P1 – demi-cadratin U+2013',
+    '[S2.1] P1 ― barre horizontale U+2015',
+    '[S2.1] P1—collé',
+    '[S2.1] P1 —collé',
+    '[S2.1] P1— collé',
+    '[S2.1] P1 —',
+    '[S2.1]  P1 — double espace avant P',
+    '[S2.1] P1  — double espace avant le tiret',
+    '[S2.1]P1 — sans espace',
+    ' [S2.1] P1 — espace en tête',
+    '\t[S2.1] P1 — tabulation en tête',
+    `[S2.1] P1${String.fromCharCode(0xa0)}— espace insécable avant le tiret`,
+    '[S2.10] P1 — autre lot (S2.10 ≠ S2.1)',
+    '[S2.1] P01 — zéro initial',
+    '[S2.1] P0 — zéro',
+    '[S2.1] P — sans numéro',
+    '[S2.1] Px — lettre',
+    '[S2.1] p1 — minuscule',
+    '[s2.1] P1 — id en minuscule',
+    '[S2.1] P１ — chiffre pleine chasse',
+    '[Ｓ2.1] P1 — lettre pleine chasse',
+    '[S2x1] P1 — le point n’est pas un joker',
+    '[S2.1.1] P1 — id à trois niveaux',
+    'S2.1 P1 — sans crochets',
+    '(S2.1) P1 — parenthèses',
+    'fixup! [S2.1] P1 — préfixe fixup',
+    'squash! [S2.1] P1 — préfixe squash',
+    'amend! [S2.1] P1 — préfixe amend',
+    'contrat: [S2.1] P1 — préfixe libre',
+    'Merge pull request #1 de [S2.1] P1 — x',
+    'Reapply "[S2.1] P1 — x"',
+    'wip [S2.1] P1 — x',
+    '',
+  ];
+  for (const subject of rejected) assert.equal(made('S2.1', subject), null, JSON.stringify(subject));
+  // P10 n'est pas P1, et P1 n'est pas P10.
+  assert.deepEqual([...completedPrompts({ id: 'S2.1' }, ['[S2.1] P10 — dix'])], ['P10']);
+  assert.deepEqual([...completedPrompts({ id: 'S2.1' }, ['[S2.1] P1 — un'])], ['P1']);
+  // Un lot ne voit jamais les prompts d'un autre lot dont l'identifiant le préfixe.
+  assert.deepEqual([...completedPrompts({ id: 'S2.1' }, ['[S2.10] P1 — x', '[S2.11] P2 — y', '[S2.1] P3 — z'])], ['P3']);
+  assert.deepEqual([...completedPrompts({ id: 'S2.10' }, ['[S2.10] P1 — x', '[S2.1] P2 — y'])], ['P1']);
+});
+
+test('détecteur : un sujet Revert (casse libre, guillemets facultatifs) ne compte jamais comme fait et annule le prompt visé', () => {
+  const revertForms = ['Revert "[S2.1] P1 — T"', 'Revert [S2.1] P1 — T', 'revert "[S2.1] P1 — T"', 'REVERT "[S2.1] P1 — T"', 'rEvErT [S2.1] P1 — T', 'Revert "[S2.1] P1 — T" sans guillemet fermant'];
+  for (const subject of revertForms) {
+    assert.deepEqual(classifySubject('S2.1', subject), { kind: 'revert', prompt: 'P1' }, subject);
+    assert.deepEqual([...completedPrompts({ id: 'S2.1' }, [subject])], [], `${subject} seul : jamais fait`);
+    // git log : du plus récent au plus ancien — le Revert est APRÈS le commit d'origine.
+    assert.deepEqual([...completedPrompts({ id: 'S2.1' }, [subject, '[S2.1] P1 — T'])], [], `${subject} après le commit : annulé`);
+  }
+  // Pas des reverts de ce prompt : colon, double espace, autre lot, autre prompt, sans crochets.
+  for (const subject of ['revert: [S2.1] P1 — T', 'Revert  "[S2.1] P1 — T"', 'Revert "[S2.10] P1 — T"', 'Revert "[S2.1] P1 - T"', 'Revert "S2.1 P1 — T"', 'Revert']) {
+    assert.deepEqual([...completedPrompts({ id: 'S2.1' }, [subject, '[S2.1] P1 — T'])], ['P1'], subject);
+  }
+});
+
+test('détecteur : l’ordre compte — le Revert annule seulement le commit d’origine qui le PRÉCÈDE', () => {
+  const lot = { id: 'S2.1' };
+  const commit = '[S2.1] P1 — T';
+  const revert = 'Revert "[S2.1] P1 — T"';
+  // `subjects` est dans l'ordre de git log : le plus récent d'abord.
+  assert.deepEqual([...completedPrompts(lot, [revert, commit])], [], 'commit puis revert : à faire');
+  assert.deepEqual([...completedPrompts(lot, [commit, revert])], ['P1'], 'revert puis commit : fait');
+  assert.deepEqual([...completedPrompts(lot, [commit, revert, commit])], ['P1'], 'commit, revert, nouveau commit : fait');
+  assert.deepEqual([...completedPrompts(lot, [revert, commit, revert, commit])], [], 'commit, revert, commit, revert : à faire');
+  assert.deepEqual([...completedPrompts(lot, [revert])], [], 'revert d’un commit absent de la plage : sans effet');
+  // Le revert d'un prompt ne touche pas les autres.
+  assert.deepEqual([...completedPrompts(lot, ['[S2.1] P3 — c', revert, '[S2.1] P2 — b', commit])].sort(), ['P2', 'P3']);
+  // Revert d'un revert : non reconnu (le contrat ne le définit pas) — le prompt reste annulé jusqu'à un nouveau commit de prompt.
+  assert.deepEqual([...completedPrompts(lot, ['Revert "Revert "[S2.1] P1 — T""', revert, commit])], []);
+  assert.deepEqual([...completedPrompts(lot, ['Reapply "[S2.1] P1 — T"', revert, commit])], []);
+  assert.deepEqual([...completedPrompts(lot, ['[S2.1] P1 — T (rejoué)', 'Revert "Revert "[S2.1] P1 — T""', revert, commit])], ['P1']);
+});
+
+test('détecteur (run) : un prompt annulé est de nouveau à faire, l’ordre des prompts et la clôture en tiennent compte', () => {
+  const revert = 'Revert "[T1.1] P1 — Premier prompt"';
+  // plain() : branche du lot, ordre de git log = du plus récent au plus ancien.
+  assert.equal(plain(['T1.1', 'P1'], { subjects: [FIRST_SUBJECT] }).exitCode, 3, 'fait');
+  assert.equal(plain(['T1.1', 'P1'], { subjects: [revert, FIRST_SUBJECT] }).exitCode, 0, 'annulé : à faire');
+  const order = plain(['T1.1', 'P2'], { subjects: [revert, FIRST_SUBJECT] });
+  assert.equal(order.exitCode, 3);
+  assert.match(order.stdout, /ORDRE DES PROMPTS — P2 exige d’abord P1/);
+  // Clôture : lot `done` (le dernier prompt l'a passé à done), trois prompts committés, puis P2 annulé.
+  const closing = (subjects) => plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'done' })], subjects });
+  assert.equal(closing([THIRD_SUBJECT, SECOND_SUBJECT, FIRST_SUBJECT]).exitCode, 0, 'tous les prompts committés');
+  const cancelledSubjects = ['Revert "[T1.1] P2 — Deuxième prompt"', THIRD_SUBJECT, SECOND_SUBJECT, FIRST_SUBJECT];
+  const cancelled = closing(cancelledSubjects);
+  assert.equal(cancelled.exitCode, 3, cancelled.stdout);
+  assert.match(cancelled.stdout, /TERMINÉ/, 'lot done sans tous ses prompts non annulés : la clôture n’est plus autorisée');
+  const stillOpen = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'ready' })], subjects: cancelledSubjects });
+  assert.equal(stillOpen.exitCode, 3);
+  assert.match(stillOpen.stdout, /PAS PRÊTE — prompts sans commit : P2/);
+  assert.equal(closing(['[T1.1] P2 — Deuxième prompt', 'Revert "[T1.1] P2 — Deuxième prompt"', THIRD_SUBJECT, SECOND_SUBJECT, FIRST_SUBJECT]).exitCode, 0, 'recommité après le revert : prête');
+  // Sur la branche unique d'une exécution Conductor aussi.
+  const unified = plain(['T1.1', 'cloture'], { lots: [lotFixture({ status: 'ready' })], branch: 'conductor/agent-lot/T1.1', subjects: ['Revert "[T1.1] P3 — Troisième prompt"', THIRD_SUBJECT, SECOND_SUBJECT, FIRST_SUBJECT] });
+  assert.equal(unified.exitCode, 3);
+  assert.match(unified.stdout, /prompts sans commit : P3/);
+});
+
+test('détecteur (git réel) : git revert produit un sujet reconnu ; l’ordre tient même avec des commits de la même seconde', () => {
+  const dir = makeRepo({ branch: 'conductor/agent-lot/T1.1' });
+  commitFile(dir, 'a.txt', FIRST_SUBJECT);
+  commitFile(dir, 'b.txt', SECOND_SUBJECT);
+  assert.equal(cli(dir, ['T1.1', 'P3', '--conductor']).json.status, 'ready');
+  gitIn(dir, 'revert', '--no-edit', 'HEAD~1'); // annule P1 : `Revert "[T1.1] P1 — Premier prompt"`
+  assert.equal(gitIn(dir, 'log', '-1', '--format=%s'), `Revert "${FIRST_SUBJECT}"`);
+  const afterRevert = cli(dir, ['T1.1', 'P1', '--conductor']);
+  assert.equal(afterRevert.json.status, 'ready', 'P1 annulé : à faire');
+  assert.match(cli(dir, ['T1.1', 'P3', '--conductor']).json.reason, /ORDRE DES PROMPTS — P3 exige d’abord P1/);
+  assert.match(cli(dir, ['T1.1', 'P2', '--conductor']).json.reason, /déjà committé/, 'P2 n’est pas touché');
+  // Revert du revert (git écrit `Revert "Revert …"` ou `Reapply "…"` selon sa version) : jamais compté comme fait, quelle que soit la forme.
+  gitIn(dir, 'revert', '--no-edit', 'HEAD');
+  assert.equal(cli(dir, ['T1.1', 'P1', '--conductor']).json.status, 'ready', gitIn(dir, 'log', '-1', '--format=%s'));
+  // Un nouveau commit de prompt le remet à fait.
+  commitFile(dir, 'c.txt', FIRST_SUBJECT);
+  assert.match(cli(dir, ['T1.1', 'P1', '--conductor']).json.reason, /déjà committé/);
+  assert.equal(cli(dir, ['T1.1', 'P3', '--conductor']).json.status, 'ready');
 });

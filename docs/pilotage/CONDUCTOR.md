@@ -133,13 +133,22 @@ branche du lot, la chercher ailleurs donnerait un faux « absent ».
   unique, l'ordre des prompts compte **tous** les prompts précédents du lot, quelle que soit la `Branche :`
   de leur étape dans le découpage (cette ligne décrit le dépôt manuel).
 - **Historique** : un prompt `P<n>` exige que les prompts qui le précèdent dans le découpage, sur la même
-  branche, soient déjà committés (`[<ID>] P<k> — …`, y compris avec un préfixe de sujet) ; un prompt déjà
-  committé est refusé (`blocked`). Hors Conductor, `--rejouer` reprend volontairement un prompt committé
-  (il ne lève jamais l'ordre) ; l'option est interdite avec `--conductor`. Le commit peut n'être que local.
-  « Prompt déjà committé » = les commits accessibles depuis `HEAD` et absents de `origin/main`
-  (`git log origin/main..HEAD`) : **aucune fenêtre de N commits**, des deux côtés (contrat v1.1 § 3). Un
-  sujet qui commence par `Revert ` ne compte **jamais** comme prompt fait (limite connue : le commit
-  d'origine qu'il annule compte encore ; rejouer un prompt annulé se décide à la main). Sans `origin/main`
+  branche, soient déjà committés ; un prompt déjà committé est refusé (`blocked`). Hors Conductor,
+  `--rejouer` reprend volontairement un prompt committé (il ne lève jamais l'ordre) ; l'option est interdite
+  avec `--conductor`. Le commit peut n'être que local. « Prompt déjà committé » = les commits accessibles
+  depuis `HEAD` et absents de `origin/main` (`git log origin/main..HEAD`) : **aucune fenêtre de N commits**,
+  des deux côtés (contrat v1.1 § 3). **Détecteur unique (contrat v1.2 § 2), identique côté Conductor** : un
+  commit compte comme le prompt `P<n>` du lot `<ID>` si, et seulement si, son **sujet** (première ligne)
+  correspond à `^\[<ID>\] P<n> — ` : `<ID>` échappé, `<n>` entier sans zéro initial, un espace, le tiret
+  cadratin U+2014, un espace. Aucune tolérance : ni tiret simple, ni double espace, ni casse différente, ni
+  préfixe (`fixup!`, `squash!`, `contrat:`, `Merge …`) ; `[S2.10] P1 — …` n'est pas un prompt de `S2.1`,
+  `P10` n'est pas `P1`. Un sujet `Revert` ne compte **jamais** comme prompt fait ; un sujet qui correspond à
+  `^Revert "?\[<ID>\] P<n> — ` (`Revert` insensible à la casse, guillemets facultatifs : ce que produit
+  `git revert`) situé **après** le commit d'origine **annule** ce prompt : il redevient à faire, l'ordre des
+  prompts l'attend de nouveau, et `cloture` n'est autorisée que si tous les prompts sont non annulés. Un
+  nouveau commit `[<ID>] P<n> — …` le remet à fait. Un revert de revert (`Revert "Revert "…""`, `Reapply "…"`)
+  n'est pas défini par le contrat et n'est pas reconnu : le prompt reste à faire jusqu'à un nouveau commit de
+  prompt. Sans `origin/main`
   (jamais récupéré), `lot.mjs` répond `error` (2) en demandant `git fetch origin` au lieu de deviner un
   historique. Un prompt déjà fusionné dans `origin/main` n'est plus « fait » pour une nouvelle branche :
   le lot est alors normalement `done` dans le plan.

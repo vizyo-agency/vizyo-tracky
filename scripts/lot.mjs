@@ -282,19 +282,41 @@ export function commitMessage(lot, step, prompt) {
   return `[${lot.id}] ${prompt.id} — ${prompt.title}`;
 }
 
+const escapeRegExp = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /**
- * Les prompts d'un lot déjà committés : `[<ID>] P<n> — …` N'IMPORTE OÙ dans le sujet
- * (« contrat: [D3.4] P1 — … » reste reconnu), comme le fait Conductor (`estLeCommitDuPrompt`).
- * `subjects` = les sujets de `origin/main..HEAD` (aucune fenêtre). Un sujet qui commence par `Revert ` (annulation d'un
- * commit de prompt) ne compte JAMAIS comme prompt fait (contrat v1.1 § 3).
+ * LE détecteur « prompt fait » (contrat v1.2 § 2), identique des deux côtés. Un sujet (première ligne d'un commit de
+ * `origin/main..HEAD`) est :
+ *  - le commit du prompt `Pn` du lot `<ID>` si, et seulement si, il correspond à l'expression ANCRÉE
+ *    `^\[<ID>\] P<n> — ` : `<ID>` échappé, `<n>` entier SANS zéro initial, un espace, le tiret cadratin U+2014, un espace.
+ *    Aucun préfixe (ni `fixup!`, ni `contrat:`), aucune tolérance (tiret simple, double espace, casse, `P01`) ;
+ *  - l'ANNULATION de ce prompt si, et seulement si, il correspond à `^Revert "?\[<ID>\] P<n> — ` (« Revert » insensible à
+ *    la casse, guillemets facultatifs : le sujet que génère `git revert`). Un sujet `Revert` ne compte jamais comme prompt fait.
+ * Rend `{ kind: 'prompt' | 'revert', prompt: 'P<n>' }` ou `null`.
+ */
+export function classifySubject(lotId, subject) {
+  const id = escapeRegExp(lotId);
+  const text = String(subject ?? '');
+  const made = new RegExp(`^\\[${id}\\] P([1-9]\\d*) — `).exec(text);
+  if (made) return { kind: 'prompt', prompt: `P${made[1]}` };
+  const reverted = new RegExp(`^[Rr][Ee][Vv][Ee][Rr][Tt] "?\\[${id}\\] P([1-9]\\d*) — `).exec(text);
+  if (reverted) return { kind: 'revert', prompt: `P${reverted[1]}` };
+  return null;
+}
+
+/**
+ * Les prompts d'un lot déjà committés. `subjects` = les sujets de `origin/main..HEAD` dans l'ORDRE DE `git log`
+ * (du plus récent au plus ancien), sans fenêtre. Lus du plus ancien au plus récent : un commit de prompt le marque fait,
+ * un `Revert "[<ID>] P<n> — …"` situé APRÈS lui l'annule (le prompt redevient à faire) ; un nouveau commit
+ * `[<ID>] P<n> — …` le marque de nouveau fait. Un revert de revert (`Revert "Revert "[<ID>] P<n> — …""`) n'est PAS reconnu
+ * (le contrat ne le définit pas) : le prompt reste annulé jusqu'à un nouveau commit de prompt.
  */
 export function completedPrompts(lot, subjects) {
   const result = new Set();
-  const marker = new RegExp(`\\[${lot.id.replace(/\./g, '\\.')}\\]\\s+(P\\d+)\\s+[—-]`);
-  for (const subject of subjects) {
-    if (subject.startsWith('Revert ')) continue;
-    const match = marker.exec(subject);
-    if (match) result.add(match[1]);
+  for (const subject of [...subjects].reverse()) {
+    const found = classifySubject(lot.id, subject);
+    if (found?.kind === 'prompt') result.add(found.prompt);
+    else if (found?.kind === 'revert') result.delete(found.prompt);
   }
   return result;
 }
@@ -479,7 +501,7 @@ export function validatePlan(plan, options = {}) {
 
 /**
  * Accès git du poste. `branch()` rend '' pour un HEAD détaché ; toute panne de git LÈVE (jamais « aucun commit »).
- * `subjects()` = les sujets de `git log origin/main..HEAD` : les commits de la branche absents de `origin/main`,
+ * `subjects()` = les sujets de `git log --topo-order origin/main..HEAD` (du plus récent au plus ancien, un parent après ses enfants : un Revert précède toujours son commit d'origine) : les commits de la branche absents de `origin/main`,
  * SANS fenêtre de N commits (contrat v1.1 § 3, identique côté Conductor). Sans `origin/main`, c'est une panne
  * (exit 2) : lancer `git fetch origin`, jamais deviner un historique.
  */
@@ -489,7 +511,7 @@ export function makeGit(repo = REPO) {
     branch: () => run(['branch', '--show-current']),
     subjects: () => {
       try {
-        return run(['log', '--format=%s', `${BASE_REF}..HEAD`]).split(/\r?\n/).filter(Boolean);
+        return run(['log', '--topo-order', '--format=%s', `${BASE_REF}..HEAD`]).split(/\r?\n/).filter(Boolean);
       } catch (error) {
         const detail = String(error.stderr ?? error.message).split(/\r?\n/).find((line) => line.trim()) ?? 'erreur inconnue';
         throw new Error(`historique ${BASE_REF}..HEAD illisible (${detail.trim()}) ; lancer git fetch origin`);
