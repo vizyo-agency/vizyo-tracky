@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   EXIT,
   HUMAN_ACTION_TYPES,
+  LOT_ID,
   acceptedBranches,
   actionPayload,
   classifyBranch,
@@ -1831,4 +1832,86 @@ test('détecteur (git réel) : git revert produit un sujet reconnu ; l’ordre t
   commitFile(dir, 'c.txt', FIRST_SUBJECT);
   assert.match(cli(dir, ['T1.1', 'P1', '--conductor']).json.reason, /déjà committé/);
   assert.equal(cli(dir, ['T1.1', 'P3', '--conductor']).json.status, 'ready');
+});
+
+// ── Format d'identifiant de lot unique ^[A-Z]\d+\.\d+$ (contrat v1.2 § 3) ──────────────────────
+const wide = (overrides = {}) => lotFixture({ id: 'S12.34', branch: 'lot/S12.34-essai', asana_task_id: 'asana-s1234', ...overrides });
+const wideDecoupage = () => decoupageText({ lotId: 'S12.34', branch: 'lot/S12.34-essai' });
+const WIDE_FIRST = '[S12.34] P1 — Premier prompt';
+
+test('identifiant : LOT_ID = ^[A-Z]\\d+\\.\\d+$ — valides à plusieurs chiffres, invalides sans exception', () => {
+  for (const valid of ['S2.1', 'S12.34', 'A0.0', 'Z99.100', 'C8.2', 'S2.10']) assert.ok(LOT_ID.test(valid), valid);
+  const invalid = [
+    'S2', 's2.1', 'S2.1.1', 'S2.1/../x', '-S2.1', ' S2.1', 'S2.1 ', 'S 2.1', 'S2. 1', 'SS2.1', 'S.1', 'S2.', '.1', '2.1', 'S2,1', 'S2-1',
+    'S2.1\n', 'S2.1\0', '', 'S2.1x', 'S2.x', 'S2.1/', 'lot/S2.1',
+    'Ｓ2.1', // S pleine chasse
+    'S２.1', // chiffre pleine chasse
+    'Š2.1', 'ſ2.1', 'ß2.1', 'S٢.1', // lettres et chiffres non ASCII
+    `S2.1${String.fromCharCode(0x200b)}`, // espace de largeur nulle
+  ];
+  for (const value of invalid) assert.equal(LOT_ID.test(value), false, JSON.stringify(value));
+  assert.deepEqual(acceptedBranches('S12.34'), ['conductor/agent-lot/S12.34', 'lot/S12.34-<slug>']);
+  assert.deepEqual(acceptedBranches('S2'), ['conductor/agent-lot/<ID>', 'lot/<ID>-<slug>']);
+});
+
+test('identifiant : un lot à plusieurs chiffres (S12.34) va de bout en bout — plan, découpage, branches, historique', () => {
+  const options = (extra = {}) => ({ lots: [wide()], decoupes: { 'S12.34': wideDecoupage() }, branch: 'conductor/agent-lot/S12.34', ...extra });
+  const ready = conductor(['S12.34', 'P1'], options());
+  assert.equal(ready.exitCode, 0, ready.stdout);
+  assert.equal(ready.json.lot, 'S12.34');
+  assert.equal(ready.json.commit_message, '[S12.34] P1 — Premier prompt');
+  assert.deepEqual(ready.json.branch.accepted, ['conductor/agent-lot/S12.34', 'lot/S12.34-<slug>']);
+  assert.equal(conductor(['S12.34', 'P1'], options({ branch: 'lot/S12.34-essai' })).json.status, 'ready', 'branche manuelle du lot');
+  // Une branche d'un lot voisin ne sert jamais : S12.3 ≠ S12.34 ≠ S2.34 ≠ S1.234.
+  for (const other of ['conductor/agent-lot/S12.3', 'conductor/agent-lot/S2.34', 'conductor/agent-lot/S1.234', 'conductor/agent-lot/S12.34/x', 'conductor/agent-lot/s12.34', 'lot/S12.3-essai', 'lot/S12.340-essai']) {
+    const result = conductor(['S12.34', 'P1'], options({ branch: other }));
+    assert.equal(result.json.status, 'blocked', other);
+    assert.equal(result.exitCode, 3, other);
+  }
+  const wrongLot = conductor(['S12.34', 'P1'], options({ branch: 'conductor/agent-lot/S2.34' }));
+  assert.match(wrongLot.json.reason, /appartient au lot S2\.34, pas à S12\.34/);
+  // L'historique : le détecteur ancré distingue S12.34 de S2.34 et de S12.3.
+  assert.equal(conductor(['S12.34', 'P1'], options({ subjects: [WIDE_FIRST] })).json.status, 'blocked');
+  assert.equal(conductor(['S12.34', 'P1'], options({ subjects: ['[S2.34] P1 — x', '[S12.3] P1 — x', '[S12.340] P1 — x'] })).json.status, 'ready');
+  assert.equal(conductor(['S12.34', 'P2'], options({ subjects: [WIDE_FIRST] })).json.status, 'ready');
+  // La clôture accepte conductor/agent-lot/S12.34 comme conductor/agent-lot/T1.1 (v1.1 § 2).
+  const closing = plain(['S12.34', 'cloture'], options({ lots: [wide({ status: 'done' })], subjects: ['[S12.34] P3 — c', '[S12.34] P2 — b', WIDE_FIRST] }));
+  assert.equal(closing.exitCode, 0, closing.stdout);
+  // Le plan accepte l'identifiant (et --check le valide avec son découpage).
+  assert.deepEqual(validatePlan({ statuses: STATUSES, lots: [wide()] }, { decoupeDir: join(fixtureEnv({ lots: [wide()], decoupes: { 'S12.34': wideDecoupage() } }).repo, 'decoupe') }), []);
+});
+
+test('identifiant : un identifiant invalide donne error (2) avec la ligne finale — jamais de trace ni de chemin', () => {
+  for (const id of ['S2', 'S2.1.1', 'S2.1/../x', '-S2.1', ' S2.1', 'S2.1 ', 'S 2.1', 'Ｓ2.1', 'S２.1', 'ſ2.1', 'ß2.1', 'Š2.1', '', 'S2.1\n']) {
+    const result = run([id, 'P1', '--conductor'], fixtureEnv());
+    const last = result.stdout.trimEnd().split('\n').at(-1);
+    assert.equal(result.exitCode, 2, JSON.stringify(id));
+    assert.ok(last.startsWith('CONDUCTOR_RESULT '), JSON.stringify(id));
+    const json = JSON.parse(last.slice('CONDUCTOR_RESULT '.length));
+    assert.equal(json.status, 'error', JSON.stringify(id));
+    assert.equal(json.exit_code, 2);
+    assert.equal(json.action, null);
+    assert.equal(json.commit_message, null, 'aucun message de commit pour un lot inconnu');
+  }
+  // Hors Conductor aussi.
+  for (const id of ['S2', 'S2.1.1', 'S2.1/../x', 'ſ2.1']) assert.equal(plain([id, 'P1']).exitCode, 2, id);
+  // Saisie humaine : les lettres ASCII minuscules sont mises en majuscules, rien d'autre (s2.1 → S2.1, ſ2.1 reste invalide).
+  assert.equal(plain(['t1.1', 'p1']).exitCode, 0);
+  assert.equal(plain(['t1.1', 'P1']).exitCode, 0);
+});
+
+test('identifiant : un plan à identifiant invalide est refusé par --check, sans jamais lire un fichier hors du dossier des découpages', () => {
+  const env = fixtureEnv({ decoupes: { 'T1.1': decoupageText() } });
+  const decoupeDir = join(env.repo, 'decoupe');
+  // Un fichier « piège » à l'emplacement que viserait `../piege` : s'il était lu, son contenu produirait une erreur de découpage.
+  writeFileSync(join(env.repo, 'piege.md'), 'pas un découpage');
+  const invalidIds = ['S2', 's2.1', 'S2.1.1', '../piege', 'S2.1/../x', 'S2.1 ', '2.1'];
+  const lots = invalidIds.map((id, index) => lotFixture({ id, asana_task_id: `x${index}`, execution: undefined, branch: undefined }));
+  const errors = validatePlan({ statuses: STATUSES, lots }, { decoupeDir });
+  for (const id of invalidIds) assert.ok(errors.some((message) => message === `${id}: identifiant invalide`), `${id} : ${errors.join(' | ')}`);
+  assert.ok(!errors.some((message) => /en-tête|découpage/.test(message)), `un fichier a été lu pour un identifiant invalide : ${errors.join(' | ')}`);
+  // Via le script : `--check` sur un plan invalide = exit 2.
+  const bad = run(['--check'], fixtureEnv({ lots: [lotFixture({ id: 'S2' })], decoupes: {} }));
+  assert.equal(bad.exitCode, 2);
+  assert.match(bad.stderr, /S2: identifiant invalide/);
 });

@@ -122,6 +122,13 @@ prompt connu et autorisé (`execution.prompts`) → **branche** → prompt déj�
 **action humaine** → `ready`. La branche passe avant la preuve : la preuve vit dans le worktree de la
 branche du lot, la chercher ailleurs donnerait un faux « absent ».
 
+- **Identifiant de lot (format unique, contrat v1.2 § 3)** : `^[A-Z]\d+\.\d+$` — une lettre majuscule, un
+  ou plusieurs chiffres, un point, un ou plusieurs chiffres (`S2.1`, `S12.34`). Le même format vaut pour
+  `lot.mjs`, les `id` de `plan.json` (`--check`), les noms de branche `conductor/agent-lot/<ID>` et le code de
+  Conductor. Invalides : `S2`, `s2.1`, `S2.1.1`, `S2.1/../x`, `-S2.1`, espaces, lettres ou chiffres non ASCII.
+  À la ligne de commande, un humain peut taper `s2.1` ou `p1` (mise en majuscules des seules lettres ASCII) ;
+  la sortie, elle, ne porte jamais que la forme canonique. Un identifiant invalide dans `plan.json` ne sert
+  jamais à fabriquer un chemin de fichier.
 - **Branche (une par lot)** : en mode `--conductor`, la branche d'exécution est `conductor/agent-lot/<ID>`
   où `<ID>` est **exactement** le lot demandé (`conductor/agent-lot/S2.1` pour `S2.1`), la même de P1 à
   Pn ; ou, en dépôt manuel, `lot/<ID>-<slug>` du même lot (exactement celle du plan si elle y est

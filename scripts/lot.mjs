@@ -17,7 +17,10 @@ function gitEnvironment() {
   return environment;
 }
 
-export const LOT_ID = /^[A-Z]\d\.\d+$/;
+/** Format d'identifiant de lot UNIQUE (contrat v1.2 § 3) : une lettre majuscule, un ou plusieurs chiffres, un point, un ou plusieurs chiffres. */
+export const LOT_ID = /^[A-Z]\d+\.\d+$/;
+/** Majuscules ASCII seulement : `toUpperCase()` rendrait `S2.1` d'un `ſ2.1` (s long) ou `SS` d'un `ß`. */
+const asciiUpper = (text) => String(text).replace(/[a-z]/g, (letter) => letter.toUpperCase());
 export const PROMPT_ID = /^P\d{1,3}$/;
 
 /** Codes de sortie du processus (contrat Conductor v1 : `docs/pilotage/CONDUCTOR.md`). */
@@ -36,7 +39,7 @@ export const EVIDENCE_RULE = 'file_exists_nonempty';
 export const BASE_REF = 'origin/main';
 
 const CONDUCTOR_LOT_BRANCH = /^conductor\/agent-lot\/(.+)$/;
-const LOT_BRANCH = /^lot\/([A-Z]\d\.\d+)-([a-z0-9][a-z0-9._-]*)$/;
+const LOT_BRANCH = /^lot\/([A-Z]\d+\.\d+)-([a-z0-9][a-z0-9._-]*)$/;
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'dev', 'develop', 'prd', 'prod', 'production', 'staging']);
 const ISO_WITH_OFFSET = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const MAX_EVIDENCE_READ = 1024 * 1024;
@@ -463,6 +466,8 @@ export function validatePlan(plan, options = {}) {
       if (!ids.has(dependency)) errors.push(`${lot.id}: dépendance inconnue ${dependency}`);
       if (dependency === lot.id) errors.push(`${lot.id}: dépend de lui-même`);
     }
+    // Un identifiant invalide (déjà signalé) ne sert jamais à fabriquer un chemin de fichier (`../x`).
+    if (!LOT_ID.test(lot.id)) continue;
     const file = join(decoupeDir, `${lot.id}.md`);
     if (['conductor-agent-lot', 'conductor-assisted'].includes(lot.execution?.mode) && !existsSync(file)) {
       errors.push(`${lot.id}: découpage requis pour Conductor`);
@@ -824,10 +829,11 @@ export function run(argv = [], env = {}) {
       io.log(`OK — ${plan.lots.length} lots valides.`);
       return finish('ready', EXIT.READY);
     }
-    const id = String(options.positional[0] ?? '').toUpperCase();
+    // Saisie tolérée pour un humain (`s2.1`, `p1`) : mise en majuscules ASCII seulement ; le format reste LOT_ID / PROMPT_ID.
+    const id = asciiUpper(options.positional[0] ?? '');
     state.lot = id || null;
     const rawMode = String(options.positional[1] ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
-    state.prompt = rawMode === 'cloture' ? 'cloture' : rawMode ? rawMode.toUpperCase() : null;
+    state.prompt = rawMode === 'cloture' ? 'cloture' : rawMode ? asciiUpper(rawMode) : null;
     if (errors.length) {
       io.error('Plan invalide :');
       for (const message of errors) io.error(`- ${message}`);
