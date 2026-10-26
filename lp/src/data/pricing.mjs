@@ -70,3 +70,14 @@ export const pricing = {
     guarantee: 'Tarif garanti à vie pour toute souscription avant cette date.',
   },
 };
+
+// FAQ Tarifs — source UNIQUE (lot S2.2 P2) : le rendu visible (lp/design/tarifs.html, généré par
+// build.mjs) et le FAQPage JSON-LD viennent tous deux de ce tableau, texte brut. Les QUATRE questions
+// visibles restent toutes, au caractère près — y compris les frais d'installation (49 €/29 €/offerte),
+// dont la cohérence avec « tout inclus » n'est PAS tranchée ici.
+pricing.faqTarifs = [
+  { q: 'Quels sont les tarifs de Vizyo Tracky ?', a: `Formule Sérénité (tout inclus, engagement 36 mois) : Tracky Lite ${pricing.plans.lite.serenite} €, Pro ${pricing.plans.pro.serenite} €, Signature ${pricing.plans.signature.serenite} € par véhicule et par an HT — boîtier, SIM, pose et garantie compris. Formule Liberté (sans engagement) : ${pricing.plans.lite.liberte}, ${pricing.plans.pro.liberte} et ${pricing.plans.signature.liberte} €/an. SIM et data incluses.` },
+  { q: 'Le temps réel est-il inclus ?', a: `Le suivi standard est inclus. Le Live temps réel (20 s) est une option à ${pricing.addons.live.perVehYear} €/véhicule/an car il génère beaucoup plus de données stockées.` },
+  { q: 'Le tarif peut-il augmenter ?', a: "Non. Le tarif est garanti à la souscription et reconduit au même prix d'une année sur l'autre." },
+  { q: "Y a-t-il des frais d'installation ?", a: 'Installation à 49 €/véhicule, 29 € dès 5 véhicules, offerte dès 10.' },
+];
