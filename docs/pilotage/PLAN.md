@@ -8,10 +8,10 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 |---:|---|---|---|---|
 | 1 | **S2.1** Relevé Google J+4 | **fait le 26/10** — classement A : aucune des 5 pages prioritaires recrawlée après le déploiement, sitemap relu le 24/10 | — | comparaison honnête avec la baseline du 22/10, sans action Google |
 | 2 | **S2.2** Corrections courtes du site | **fait le 26/10** — déployé (PR n° 148, marketing-seul) | — | tarif périmé retiré, FAQ visible = JSON-LD, bons liens de footer ; baseline datée dans `docs/marketing/seo/corrections-2026-10/controle-s2.2.md` |
-| 3 | **S2.11** Performance mobile et PDF DPA | prêt — découpé le 26/10 (3 prompts) | `/lot S2.11 P1` | polices non bloquantes, place du simulateur réservée, PDF DPA en `noindex, follow` ; LCP mesuré par un humain |
-| 4 | **V5.5** Panel hebdomadaire de SERP | prêt — découpé le 26/10 (2 prompts) | `/lot V5.5 P1` | huit requêtes figées, trois surfaces, règle de version |
-| 5 | **G4.5** Protocole et preuves IA | prêt — découpé le 26/10 (2 prompts) | `/lot G4.5 P1` | protocole d'un passage 5×4 et gabarits vides, sans prompt ni résultat |
-| 6 | **A1.6** Mots-clés négatifs | prêt — découpé le 26/10 (2 prompts) | `/lot A1.6 P1` | liste de départ par catégorie, règle d'évolution, liste de contrôle d'import |
+| 3 | **S2.11** Performance mobile et PDF DPA | **partiel** — P1 à P3 faits et déployés le 26/10 ; LCP < 2,5 s non atteint (voir `controle-s2.11.md`) | investigation par trace de performance, puis prompts P4+ | image du héros responsive, police de repli ajustée, cartes de prix sans saut |
+| 4 | **V5.5** Panel hebdomadaire de SERP | **fait le 26/10** — PR n° 152 | — | huit requêtes figées, trois surfaces, règle de version |
+| 5 | **G4.5** Protocole et preuves IA | **fait le 26/10** — PR n° 153 | — | protocole d'un passage 5×4 et gabarits vides |
+| 6 | **A1.6** Mots-clés négatifs | **fait le 26/10** — PR n° 154 | — | liste de départ à compléter avec les termes réels du pilote |
 | 7 | **S2.12** Douze villes restantes | décision après mesure (J+4 du déploiement, 30/10) | `/lot S2.12` après arbitrage | enrichir, regrouper ou noindexer — jamais douze textes artificiels |
 | 8 | **S2.13** E-E-A-T | backlog | `/lot S2.13` | preuves publiques réelles, aucune preuve fabriquée |
 | 9 | **V5.2** Format d'archive hebdomadaire | **fait le 26/10** — premier lot d'Agent Lot | — | format, modèle vide et README dans `docs/marketing/seo/veille/` |
