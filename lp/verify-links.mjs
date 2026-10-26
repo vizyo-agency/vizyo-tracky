@@ -133,6 +133,15 @@ const indexedPages = [...sitemap.matchAll(/<loc>(.*?)<\/loc>/g)].map((match) => 
 const orphans = indexedPages.filter((page) => !depth.has(page));
 assert(orphans.length === 0, `Pages indexables orphelines depuis la Home : ${orphans.join(', ')}`);
 
+// Feuille Google Fonts non bloquante (lot S2.11 P1) : jamais en rel="stylesheet" hors d'un <noscript>.
+// decouvrir-depot.html n'a pas de source dans lp/design/ et n'est pas régénéré par build.mjs : hors périmètre ici.
+for (const file of htmlFiles.filter((f) => f !== 'decouvrir-depot.html')) {
+  const html = readFileSync(join(publicDir, file), 'utf8');
+  const noscriptFree = html.replace(/<noscript>[\s\S]*?<\/noscript>/gi, '');
+  const blocking = /<link[^>]*href="https:\/\/fonts\.googleapis\.com\/css2\?[^"]*"[^>]*rel="stylesheet"[^>]*>/i.test(noscriptFree);
+  assert(!blocking, `${file} charge la feuille Google Fonts en rel="stylesheet" bloquant hors d'un <noscript>.`);
+}
+
 console.log(`✓ ${generatedCities.length} pages villes reliées depuis Occitanie`);
 console.log('✓ Occitanie à profondeur 1 ; Toulouse et les autres villes à profondeur 2 maximum');
 console.log(`✓ ${indexedPages.length} pages indexables accessibles depuis la Home, sans orpheline`);

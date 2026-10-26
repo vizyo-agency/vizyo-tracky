@@ -236,7 +236,12 @@ function transform(html, out) {
   const helmetM = html.match(/<helmet>([\s\S]*?)<\/helmet>/);
   const bodyM = html.match(/<\/helmet>([\s\S]*?)<\/x-dc>/);
   if (!helmetM || !bodyM) throw new Error('structure x-dc introuvable dans ' + out);
-  const helmet = helmetM[1].trim();
+  // Feuille Google Fonts : chargée sans bloquer le rendu (preload + bascule en stylesheet au onload,
+  // + <noscript> pour les navigateurs sans JS) — mesure Lighthouse du 26/10 (resource bloquante).
+  const helmet = helmetM[1].trim().replace(
+    /<link href="(https:\/\/fonts\.googleapis\.com\/css2\?[^"]+)" rel="stylesheet">/,
+    '<link rel="preload" as="style" href="$1" onload="this.onload=null;this.rel=\'stylesheet\'">\n<noscript><link rel="stylesheet" href="$1"></noscript>'
+  );
   let body = bodyM[1].trim();
   // bindings support.js → hooks vanilla
   body = body
