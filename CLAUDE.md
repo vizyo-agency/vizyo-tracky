@@ -1,5 +1,36 @@
 # Tracky — consignes de dépôt
 
+## Pilotage par lots — la porte d'entrée de tout nouveau travail
+
+Le dépôt est la source de vérité du chantier ; Asana en est le miroir lisible. Avant de coder,
+chercher l'identifiant stable du lot dans `docs/pilotage/PLAN.md`, puis lancer :
+
+```text
+/lot <ID> P<n>       # un prompt ciblé, un test ciblé, un commit
+/lot <ID> cloture    # contrôles complets, relecture contradictoire, PR
+```
+
+Un lot sans découpage se lance avec `/lot <ID>`. Un lot de plus de quatre heures doit être découpé
+dans `docs/pilotage/decoupe/<ID>.md` avant de commencer. `node scripts/lot.mjs <ID>` affiche son
+brief, ses dépendances et son état. Une dépendance ouverte arrête le travail : on ne reconstruit pas
+provisoirement ce qu'elle doit livrer.
+
+Règles non négociables :
+
+- un worktree par branche ; ne jamais changer de branche dans un dossier partagé ;
+- un prompt de 15 à 30 minutes, cinq fichiers environ, un test ciblé et un commit au message affiché ;
+- aucune suite complète, aucune PR et aucune relecture pendant les prompts ; ces gestes arrivent une
+  seule fois à la clôture ;
+- `main` ne reçoit pas de commit direct de développement : une branche `lot/<ID>-<slug>` et une PR ;
+- dans Vizyo Conductor, Agent Lot ne pousse jamais lui-même ; tout prompt découpé peut travailler dans
+  le dépôt, tandis qu'un navigateur authentifié, un secret manquant, une décision, une communication
+  externe ou un déploiement produit une `ACTION HUMAINE REQUISE` puis une reprise explicite ;
+- le statut, les dépendances et les critères viennent de `docs/pilotage/plan.json`. Une modification
+  faite uniquement dans Asana sera écrasée ou deviendra incohérente.
+
+Le mode d'emploi complet est dans [`docs/pilotage/GUIDE.md`](./docs/pilotage/GUIDE.md) et les règles
+de l'orchestrateur dans [`docs/pilotage/CONDUCTOR.md`](./docs/pilotage/CONDUCTOR.md).
+
 ## 📁 Où vont les fichiers — règle du propriétaire (2026-09-07)
 
 > **Aucun fichier de documentation à la racine du dépôt. Tous les `.md` vivent dans `docs/`.**
