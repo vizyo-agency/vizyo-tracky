@@ -26,6 +26,7 @@ import {
   parseNotBefore,
   promptsBefore,
   run,
+  scrubLocalPaths,
   statusGate,
   validatePlan,
   validateRelativePath,
@@ -388,6 +389,86 @@ test('branche : hors Conductor, la branche du lot reste exigée à l’identique
 test('compat : --depuis <ref> (Conductor antérieur au contrat) est accepté et sans effet', () => {
   const { json } = conductor(['T1.1', 'P1', '--depuis', 'origin/main'], { branch: 'conductor/agent-lot/T1.1' });
   assert.equal(json.status, 'ready');
+});
+
+// Un chemin absolu local (Windows, UNC ou POSIX usuel) ne doit jamais apparaître dans une raison ni dans stderr.
+const ABSOLUTE_LOCAL_PATH = /(?:[A-Za-z]:[\\/]|\\\\|\/(?:Users|home|tmp|var|private|root|mnt|opt|etc|usr|srv|Volumes)\/)/;
+
+function assertNoLocalPath(text, label) {
+  assert.ok(!ABSOLUTE_LOCAL_PATH.test(text), `${label} : chemin absolu local dans « ${text} »`);
+}
+
+test('reason : un plan absent ou illisible ne révèle que son chemin relatif au dépôt', () => {
+  const env = fixtureEnv();
+  const missing = conductorWith(['T1.1', 'P1'], { ...env, planPath: join(env.repo, 'docs', 'pilotage', 'absent.json') });
+  assert.equal(missing.exitCode, 2);
+  assert.equal(missing.json.reason, 'Plan illisible : docs/pilotage/absent.json (ENOENT)');
+  assertNoLocalPath(missing.json.reason, 'plan absent');
+  assertNoLocalPath(missing.stderr, 'stderr, plan absent');
+  assert.ok(!missing.json.reason.includes(env.repo) && !missing.stdout.includes(env.repo));
+
+  const broken = join(env.repo, 'plan-casse.json');
+  writeFileSync(broken, '{ "lots": [');
+  const invalid = conductorWith(['T1.1', 'P1'], { ...env, planPath: broken });
+  assert.equal(invalid.exitCode, 2);
+  assert.ok(invalid.json.reason.startsWith('Plan illisible : plan-casse.json (JSON invalide'), invalid.json.reason);
+  assertNoLocalPath(invalid.json.reason, 'plan cassé');
+
+  const outside = conductorWith(['T1.1', 'P1'], { ...env, planPath: join(tmpdir(), 'lot-inexistant-hors-depot', 'plan.json') });
+  assert.equal(outside.json.reason, 'Plan illisible : plan.json (ENOENT)', 'hors dépôt : le nom du fichier seulement');
+  assertNoLocalPath(outside.stderr, 'plan hors dépôt');
+});
+
+test('reason : une erreur interne ou git qui cite un chemin absolu est assainie (racine du dépôt, lecteur, POSIX, UNC)', () => {
+  const env = fixtureEnv({ lots: [actionLot()], branch: 'conductor/agent-lot/T1.1' });
+  const thrown = (message) => ({ ...env, checkEvidence: () => { throw new Error(message); } });
+  const inRepo = conductorWith(['T1.1', 'P1'], thrown(`EACCES: permission denied, open '${join(env.repo, 'docs', 'preuve', 'releve.md')}'`));
+  assert.equal(inRepo.exitCode, 2);
+  assert.equal(inRepo.json.status, 'error');
+  assert.ok(inRepo.json.reason.includes(`open 'docs`), inRepo.json.reason);
+  assert.ok(inRepo.json.reason.includes('preuve'), 'la partie relative au dépôt reste lisible');
+  assertNoLocalPath(inRepo.json.reason, 'dans le dépôt');
+  assert.ok(!inRepo.json.reason.includes(env.repo));
+  for (const absolute of ['C:\\Users\\alice\\AppData\\x.json', 'D:/www/projet/x.json', '\\\\serveur\\partage\\x', '/Users/alice/x', '/home/alice/.ssh/x', '/tmp/lot-abc/x']) {
+    const result = conductorWith(['T1.1', 'P1'], thrown(`ENOENT: no such file or directory, open '${absolute}'`));
+    assert.equal(result.exitCode, 2, absolute);
+    assert.ok(result.json.reason.includes('<chemin local>'), `${absolute} → ${result.json.reason}`);
+    assertNoLocalPath(result.json.reason, absolute);
+    assertNoLocalPath(result.stderr, `stderr ${absolute}`);
+  }
+  const git = conductor(['T1.1', 'P1'], { gitError: `fatal: detected dubious ownership in repository at '${env.repo}'` });
+  assert.equal(git.exitCode, 2);
+  assertNoLocalPath(git.json.reason, 'git');
+});
+
+test('reason : scrubLocalPaths ne touche ni les chemins relatifs ni les URL', () => {
+  const repo = join(tmpdir(), 'lot-scrub-depot');
+  assert.equal(scrubLocalPaths('docs/pilotage/plan.json absent', repo), 'docs/pilotage/plan.json absent');
+  assert.equal(scrubLocalPaths('https://example.test/tmp/x et /lot S2.1 P1', repo), 'https://example.test/tmp/x et /lot S2.1 P1');
+  assert.equal(scrubLocalPaths(`${repo}/scripts/lot.mjs`, repo), 'scripts/lot.mjs');
+  assert.equal(scrubLocalPaths(`${repo.replaceAll('\\', '/')}/docs/a.md`, repo), 'docs/a.md');
+  assert.equal(scrubLocalPaths(`erreur dans ${repo}`, repo), 'erreur dans .');
+  assert.equal(scrubLocalPaths(null, repo), '');
+});
+
+test('reason : aucun statut du contrat ne laisse passer un chemin absolu local', () => {
+  const absoluteBranch = 'conductor/agent-lot/T9.9';
+  const cases = [
+    conductor(['T1.1', 'P1']),
+    conductor(['T1.1', 'P1'], { branch: absoluteBranch }),
+    conductor(['T1.1', 'P1'], { branch: '' }),
+    conductor(['T1.1', 'P3']),
+    conductor(['T1.1', 'P1'], { lots: [lotFixture({ status: 'waiting', not_before: '2999-01-01T00:00:00+01:00' })] }),
+    conductor(['T9.9', 'P1']),
+    conductor(['T1.1', 'banane']),
+  ];
+  for (const { json, stdout, stderr } of cases) {
+    assertNoLocalPath(json.reason ?? '', json.status);
+    assertNoLocalPath(stdout, `stdout ${json.status}`);
+    assertNoLocalPath(stderr, `stderr ${json.status}`);
+  }
+  const real = run(['S2.1', 'P1', '--conductor'], { git: { branch: () => 'main', subjects: () => [] }, now: new Date('2026-10-26T05:00:00Z') });
+  assertNoLocalPath(real.stdout, 'plan réel');
 });
 
 test('arguments : --depuis n’avale jamais l’option suivante, sa valeur est obligatoire', () => {

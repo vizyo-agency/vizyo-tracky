@@ -108,7 +108,9 @@ branche du lot, la chercher ailleurs donnerait un faux « absent ».
   (`authenticated-browser`, `secret`, `decision`, `external-submit`, `deployment`), `responsible`, `url`,
   `instructions`, `forbidden`, `evidence_path`, `evidence_rule` (`file_exists_nonempty`),
   `resume_command` et `not_before`. Clé d'idempotence côté Conductor : `action.id` + `lot` + `prompt`.
-- **Secrets** : aucune valeur de secret ni donnée de compte ne figure dans `CONDUCTOR_RESULT`.
+- **Secrets** : aucune valeur de secret ni donnée de compte ne figure dans `CONDUCTOR_RESULT`. `reason` ne
+  contient jamais de chemin absolu local : chemins relatifs au dépôt seulement (un chemin absolu d'un
+  message d'erreur est remplacé par `<chemin local>`).
 - **Compatibilité** : `--depuis <ref>` (passé par les versions de Conductor antérieures au contrat) est
   accepté et sans effet, mais sa valeur est obligatoire et ne peut pas commencer par `-` (`--depuis
   --conductor` n'avale pas `--conductor` : `error`, avec la ligne finale). Toute autre option inconnue

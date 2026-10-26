@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -588,6 +588,33 @@ export function conductorLine(result) {
   })}`;
 }
 
+/** Chemin d'un fichier relatif au dépôt, en `/` ; hors dépôt, le seul nom du fichier. Jamais de chemin absolu local. */
+function repoRelative(repo, target) {
+  const path = relative(repo, target).split(sep).join('/');
+  return path === '' || path.startsWith('..') || isAbsolute(path) ? basename(target) : path;
+}
+
+/**
+ * Retire d'un message tout chemin absolu local (contrat v1.1 § 5) : la racine du dépôt devient un chemin relatif, tout
+ * autre chemin absolu (lecteur Windows, UNC, dossiers usuels POSIX) devient `<chemin local>`. Le dossier de l'utilisateur,
+ * le dossier temporaire ou l'emplacement du dépôt n'ont rien à faire dans une raison lue par une autre machine.
+ */
+export function scrubLocalPaths(text, repo = REPO) {
+  let result = String(text ?? '');
+  const roots = new Set([repo]);
+  try {
+    roots.add(realpathSync(repo));
+  } catch {
+    // dépôt introuvable : le motif générique suffit
+  }
+  for (const root of [...roots].sort((a, b) => b.length - a.length)) {
+    for (const variant of new Set([root, root.replaceAll('\\', '/'), root.replaceAll('/', '\\')])) {
+      result = result.split(`${variant}/`).join('').split(`${variant}\\`).join('').split(variant).join('.');
+    }
+  }
+  return result.replace(/(?<![\w.:/-])(?:[A-Za-z]:[\\/]|\\\\|\/(?:Users|home|tmp|var|private|root|mnt|opt|etc|usr|srv|Volumes)\/)[^\s'"`)>\]]*/g, '<chemin local>');
+}
+
 function parseArgs(argv) {
   const options = { check: false, conductor: false, replay: false, since: null, positional: [], unknown: [], problems: [] };
   for (let index = 0; index < argv.length; index += 1) {
@@ -625,14 +652,16 @@ export function run(argv = [], env = {}) {
 
   const out = [];
   const err = [];
-  const io = { log: (line = '') => out.push(String(line)), error: (line = '') => err.push(String(line)) };
+  // Aucun chemin absolu local dans une erreur ni dans `reason` (contrat v1.1 § 5) : chemins relatifs au dépôt seulement.
+  const clean = (text) => scrubLocalPaths(text, repo);
+  const io = { log: (line = '') => out.push(String(line)), error: (line = '') => err.push(clean(line)) };
   const options = parseArgs(argv);
   const conductorMode = options.conductor;
   const state = { lot: null, prompt: null, current: null, action: null, commit: null };
 
   const finish = (status, exitCode, reason = null) => {
     if (conductorMode) {
-      io.log(conductorLine({ status, exit_code: exitCode, lot: state.lot, prompt: state.prompt, reason, current: state.current, action: state.action, commit_message: state.commit }));
+      io.log(conductorLine({ status, exit_code: exitCode, lot: state.lot, prompt: state.prompt, reason: reason === null ? null : clean(reason), current: state.current, action: state.action, commit_message: state.commit }));
     }
     return { exitCode, stdout: out.length ? `${out.join('\n')}\n` : '', stderr: err.length ? `${err.join('\n')}\n` : '' };
   };
@@ -660,7 +689,9 @@ export function run(argv = [], env = {}) {
     try {
       plan = loadPlan(planPath);
     } catch (error) {
-      return usage(`Plan illisible : ${error.message}`);
+      // Le message natif de Node porte le chemin ABSOLU du fichier : on ne garde que son nom relatif et la cause.
+      const cause = error instanceof SyntaxError ? `JSON invalide, ${error.message}` : (error?.code ?? 'lecture impossible');
+      return usage(`Plan illisible : ${repoRelative(repo, planPath)} (${cause})`);
     }
     const errors = validatePlan(plan, { decoupeDir });
     if (options.check) {
