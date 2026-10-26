@@ -105,10 +105,11 @@ ${otherCities.map((city) => `<a href="gps-flotte-${city.slug}.html" style="displ
 </div>`;
 
 // ── <head> SEO (le design fournit polices + styles via son <helmet>) ──
-function seoHead({ title, description, canonical, jsonld = [], geo, robots }) {
+function seoHead({ title, description, canonical, jsonld = [], geo, robots, preloadImages = [] }) {
   const img = abs(site.ogImage);
   const ld = jsonld.map((o) => `<script type="application/ld+json">${JSON.stringify(o)}</script>`).join('\n');
   const geoTags = geo ? `<meta name="geo.region" content="FR-${geo.dept}"><meta name="geo.placename" content="${esc(geo.place)}"><meta name="geo.position" content="${geo.lat};${geo.lng}"><meta name="ICBM" content="${geo.lat}, ${geo.lng}">` : '';
+  const preloadTags = preloadImages.map((p) => `<link rel="preload" as="image" type="${p.type}" href="${p.href}" fetchpriority="high"${p.media ? ` media="${p.media}"` : ''}>`).join('\n');
   return `<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
@@ -116,7 +117,7 @@ function seoHead({ title, description, canonical, jsonld = [], geo, robots }) {
 <link rel="canonical" href="${canonical}">
 <meta name="robots" content="${robots || 'index,follow'}">
 <meta name="theme-color" content="#080B0A">
-${geoTags}
+${preloadTags ? preloadTags + '\n' : ''}${geoTags}
 <meta property="og:type" content="website"><meta property="og:site_name" content="${esc(site.name)}"><meta property="og:locale" content="${site.locale}">
 <meta property="og:title" content="${esc(title)}"><meta property="og:description" content="${esc(description)}"><meta property="og:url" content="${canonical}"><meta property="og:image" content="${img}">
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${esc(title)}"><meta name="twitter:description" content="${esc(description)}"><meta name="twitter:image" content="${img}">
@@ -305,7 +306,7 @@ const pagesReecrites = new Set();
 function buildPage(meta) {
   const canonical = meta.out === 'index.html' ? site.baseUrl + '/' : abs(meta.out);
   const { helmet, body } = transform(readDesign(meta.file || meta.out), meta.out);
-  const head = seoHead({ title: meta.title, description: meta.description, canonical, jsonld: meta.jsonld || [], geo: meta.geo, robots: meta.robots });
+  const head = seoHead({ title: meta.title, description: meta.description, canonical, jsonld: meta.jsonld || [], geo: meta.geo, robots: meta.robots, preloadImages: meta.preloadImages });
   const html = `<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -343,7 +344,11 @@ ${body}
 
 // ── Manifeste des pages principales (SEO) ──
 const PAGES = [
-  { out: 'index.html', title: 'Traceur GPS pour flotte en Occitanie | Vizyo Tracky', description: "Suivez vos véhicules en temps réel, coupez le moteur à distance, recevez des alertes. Boîtier GPS et application française, installation sur site par nos techniciens en Occitanie.", jsonld: [ORG_LD, WEBSITE_LD] },
+  { out: 'index.html', title: 'Traceur GPS pour flotte en Occitanie | Vizyo Tracky', description: "Suivez vos véhicules en temps réel, coupez le moteur à distance, recevez des alertes. Boîtier GPS et application française, installation sur site par nos techniciens en Occitanie.", jsonld: [ORG_LD, WEBSITE_LD],
+    preloadImages: [
+      { href: 'assets/img/screen-carte-toulouse-mobile.avif', type: 'image/avif', media: '(max-width:480px)' },
+      { href: 'assets/img/screen-carte-toulouse.avif', type: 'image/avif', media: '(min-width:481px)' },
+    ] },
   { out: 'fonctionnalites.html', title: 'Fonctionnalités du traceur GPS de flotte | Vizyo Tracky', description: "Suivi temps réel, historique des trajets, coupure moteur par plage horaire, alertes, rapports, conducteurs identifiés et mode vie privée CNIL : toutes les fonctionnalités de Vizyo Tracky.", jsonld: [productLd('fonctionnalites.html'), crumb([HOME, { name: 'Fonctionnalités', out: 'fonctionnalites.html' }])] },
   { out: 'tarifs.html', title: `Tarifs GPS flotte tout inclus — dès ${P.lite.serenite} €/véhicule/an | Vizyo Tracky`, description: `Modèle tout inclus : boîtier, SIM, pose et garantie compris. Tracky Lite ${P.lite.serenite} €, Pro ${P.pro.serenite} €, Signature ${P.signature.serenite} €/véhicule/an HT (Sérénité, 36 mois). Sans engagement dès ${P.lite.liberte} €/an. Devis en ligne.`, jsonld: [productLd('tarifs.html'), crumb([HOME, { name: 'Tarifs', out: 'tarifs.html' }]), faqLd(FAQ_TARIFS)] },
   { out: 'secteur-public.html', title: 'GPS véhicules de service — secteur public & médico-social | Vizyo Tracky', description: "Géolocalisation des véhicules de service pour établissements publics, foyers, structures médico-sociales et collectivités : conformité CNIL, conducteurs identifiés, données souveraines, marchés publics.", jsonld: [crumb([HOME, { name: 'Secteur public', out: 'secteur-public.html' }])] },

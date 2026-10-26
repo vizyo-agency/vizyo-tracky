@@ -8,6 +8,8 @@
 <link rel="canonical" href="https://tracky.vizyoagency.com/">
 <meta name="robots" content="index,follow">
 <meta name="theme-color" content="#080B0A">
+<link rel="preload" as="image" type="image/avif" href="assets/img/screen-carte-toulouse-mobile.avif" fetchpriority="high" media="(max-width:480px)">
+<link rel="preload" as="image" type="image/avif" href="assets/img/screen-carte-toulouse.avif" fetchpriority="high" media="(min-width:481px)">
 
 <meta property="og:type" content="website"><meta property="og:site_name" content="Vizyo Tracky"><meta property="og:locale" content="fr_FR">
 <meta property="og:title" content="Traceur GPS pour flotte en Occitanie | Vizyo Tracky"><meta property="og:description" content="Suivez vos véhicules en temps réel, coupez le moteur à distance, recevez des alertes. Boîtier GPS et application française, installation sur site par nos techniciens en Occitanie."><meta property="og:url" content="https://tracky.vizyoagency.com/"><meta property="og:image" content="https://tracky.vizyoagency.com/og-cover.jpg">
@@ -172,6 +174,8 @@ img,svg,video{max-width:100%}
 <section class="hero2">
 <!-- Fond : vraie carte de flotte (agglomération de Toulouse), zoom lent. AVIF→WebP→JPG, image LCP. -->
 <div class="hero2-map"><picture>
+<source media="(max-width:480px)" srcset="assets/img/screen-carte-toulouse-mobile.avif" type="image/avif">
+<source media="(max-width:480px)" srcset="assets/img/screen-carte-toulouse-mobile.webp" type="image/webp">
 <source srcset="assets/img/screen-carte-toulouse.avif" type="image/avif">
 <source srcset="assets/img/screen-carte-toulouse.webp" type="image/webp">
 <img src="assets/img/screen-carte-toulouse.jpg" alt="Carte de la flotte Vizyo Tracky en temps réel — agglomération de Toulouse" width="1920" height="1032" loading="eager" fetchpriority="high" decoding="async">
