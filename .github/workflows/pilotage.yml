@@ -1,0 +1,42 @@
+# CI minimale du pilotage par lots (`/lot`). Lecture seule : aucun secret, aucune écriture, aucun déploiement.
+# Elle ne remplace pas `pnpm verify` (qui exige base, Docker et dépendances) : elle garde seulement le plan,
+# le lanceur `scripts/lot.mjs` et la landing statique, qui n'ont besoin que de Node.
+name: Pilotage
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/lot*'
+      - 'docs/pilotage/**'
+      - '.claude/**'
+      - 'CLAUDE.md'
+      - 'lp/**'
+      - '.github/workflows/pilotage.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pilotage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pilotage:
+    name: Plan, lanceur /lot et liens de la landing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Installer Node (version du dépôt)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+      - name: Tests du lanceur /lot
+        run: node --test scripts/lot.test.mjs
+      - name: Cohérence du plan
+        run: node scripts/lot.mjs --check
+      - name: Liens de la landing
+        run: node lp/verify-links.mjs
