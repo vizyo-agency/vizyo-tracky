@@ -70,6 +70,14 @@ while (queue.length) {
   }
 }
 
+// Footer Home « Produit » : Secteur public et Sécurité doivent pointer vers leurs pages dédiées,
+// jamais revenir aux anciennes ancres de section (#produit, #faq) — lot S2.2 P3.
+const footerProduitLinks = anchors('index.html').filter((anchor) => ['Secteur public', 'Sécurité & RGPD'].includes(anchor.text));
+const footerSecteurPublic = footerProduitLinks.find((anchor) => anchor.text === 'Secteur public');
+const footerSecurite = footerProduitLinks.find((anchor) => anchor.text === 'Sécurité & RGPD');
+assert(footerSecteurPublic && localTarget('index.html', footerSecteurPublic.href) === 'secteur-public.html', 'Le lien « Secteur public » du footer Home ne doit plus pointer vers #produit : il doit cibler secteur-public.html.');
+assert(footerSecurite && localTarget('index.html', footerSecurite.href) === 'securite.html', 'Le lien « Sécurité & RGPD » du footer Home ne doit plus pointer vers #faq : il doit cibler securite.html.');
+
 const homeHubLinks = anchors('index.html').filter((anchor) => localTarget('index.html', anchor.href) === 'gps-flotte-occitanie.html');
 assert(homeHubLinks.some((anchor) => !isHidden(anchor) && /zones d'intervention en Occitanie/i.test(anchor.text)), 'La Home doit contenir une ancre visible et descriptive vers le hub Occitanie.');
 assert(depth.get('gps-flotte-occitanie.html') === 1, `Le hub Occitanie doit être à profondeur 1 (profondeur constatée : ${depth.get('gps-flotte-occitanie.html') ?? 'inaccessible'}).`);
