@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * `pnpm verify` — toutes les gardes, TOUJOURS jusqu'au bout, et un verdict qui ne ment pas.
- * (Quatre à l'origine ; treize depuis le 07/10/2026 : `ETAPES` ci-dessous fait foi.)
+ * (Quatre à l'origine ; treize depuis le 07/10/2026, quatorze depuis le 26/10/2026 : `ETAPES` ci-dessous fait foi.)
  *
  * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
  * │ Pourquoi ce lanceur existe — mesuré le 2026-09-23.                                        │
@@ -57,6 +57,9 @@ const ETAPES = [
   { cle: 'confirmations', titre: 'Modales de danger (ce qui est perdu)', script: 'verif:confirmations' },
   { cle: 'numero-urgence', titre: 'Numéro d’urgence (un seul endroit)', script: 'verif:numero-urgence' },
   { cle: 'carte-gardes', titre: 'Carte (sources MapLibre gardées)', script: 'verif:carte-gardes' },
+  // 26/10/2026 — le pilotage par lots (`/lot`) : plan.json cohérent + tests du lanceur, sur fixtures. Une dizaine de
+  // secondes, sans base ni Docker ; sans cette étape le plan dérive sans signal (revue de la PR de pilotage, M8).
+  { cle: 'lot', titre: 'Pilotage /lot (plan + lanceur)', script: 'verif:lot' },
   { cle: 'tests', titre: 'Tests', script: 'test' },
 ];
 
