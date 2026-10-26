@@ -32,8 +32,7 @@
   apostrophe ou un accent grave était refusé par la garde ; corrigé côté Conductor (PR n° 434 et n° 436) et
   vérifié contre les vrais sujets de Nisiv.
 - Seule l'instance **dev** a été exercée ; Nisiv reste en dev.
-- Coffre Tracky : aucun secret propre au projet n'est documenté ici ; les secrets de plateforme restent
-  hérités.
+- Coffre Tracky : **inventaire du 26/10/2026 (OBSERVÉ sur l'instance dev, noms et compteurs seulement, aucune valeur)** : 0 secret propre au projet, 0 lecture par un agent et 0 révélation humaine sur les 28 derniers jours. Les agents utilisent les secrets hérités de la plateforme ; la session de code d'Agent Lot, elle, ne reçoit pas l'environnement de Conductor (liste blanche, PR n° 426 côté Conductor), donc aucun secret de plateforme n'entre dans un prompt. Les lots S2.1, S2.2 et V5.2 n'ont eu besoin d'aucun secret. À refaire (nom, usage, propriétaire, portée, grade minimal, rotation, agents consommateurs) au premier secret ajouté, et à relire dans le journal après les premiers runs qui en lisent.
 
 Le dépôt Tracky est public, mais Agent Lot a quand même besoin d'une installation GitHub App pour
 les jetons d'installation, les écritures, les protections de branche et les webhooks. Un clone public
