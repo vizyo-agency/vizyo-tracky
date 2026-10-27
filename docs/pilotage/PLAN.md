@@ -9,7 +9,7 @@ Source machine : [`plan.json`](./plan.json). Mode d'emploi : [`GUIDE.md`](./GUID
 | 1 | **S2.1** Relevé Google J+4 | **fait le 26/10** — classement A : aucune des 5 pages prioritaires recrawlée après le déploiement, sitemap relu le 24/10 | — | comparaison honnête avec la baseline du 22/10, sans action Google |
 | 2 | **S2.2** Corrections courtes du site | **fait le 26/10** — déployé (PR n° 148, marketing-seul) | — | tarif périmé retiré, FAQ visible = JSON-LD, bons liens de footer ; baseline datée dans `docs/marketing/seo/corrections-2026-10/controle-s2.2.md` |
 | 3 | **S2.11** Performance mobile et PDF DPA | **partiel** — P1 à P3 faits et déployés le 26/10 ; LCP < 2,5 s non atteint (voir `controle-s2.11.md`) | investigation par trace de performance, puis prompts P4+ | image du héros responsive, police de repli ajustée, cartes de prix sans saut |
-| 3b | **S2.15** Home : police de repli et image du héros | prêt — découpé le 27/10 (3 prompts) ; déployé seulement si LCP et CLS sont meilleurs | `/lot S2.15 P1` | image recadrée pour mobile préchargée, police de repli ajustée, contrôles verrouillés |
+| 3b | **S2.15** Home : police de repli et image du héros | **partiel — annulé le 27/10** : CLS 0,138 → 0,004 mais LCP de production moins bon (2,32 → 2,65 s) ; voir `controle-s2.15.md` | à reprendre après les pistes du rapport | CLS réglé sans dégrader le LCP |
 | 4 | **V5.5** Panel hebdomadaire de SERP | **fait le 26/10** — PR n° 152 | — | huit requêtes figées, trois surfaces, règle de version |
 | 5 | **G4.5** Protocole et preuves IA | **fait le 26/10** — PR n° 153 | — | protocole d'un passage 5×4 et gabarits vides |
 | 6 | **A1.6** Mots-clés négatifs | **fait le 26/10** — PR n° 154 | — | liste de départ à compléter avec les termes réels du pilote |
