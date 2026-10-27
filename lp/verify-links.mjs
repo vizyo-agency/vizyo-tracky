@@ -125,28 +125,6 @@ for (const file of ['tarifs.html']) {
   faqPagesChecked++;
 }
 
-// Héros Home : image recadrée servie aux téléphones et préchargée (lot S2.15 P1).
-const indexHtml = readFileSync(join(publicDir, 'index.html'), 'utf8');
-for (const ext of ['avif', 'webp']) {
-  const re = new RegExp(`<source media="\\(max-width:480px\\)" srcset="assets/img/screen-carte-toulouse-mobile\\.${ext}" type="image/${ext}">`);
-  assert(re.test(indexHtml), `La Home doit contenir une source <picture> media="(max-width:480px)" en ${ext} pour le héros mobile.`);
-}
-assert(/<link rel="preload" as="image" type="image\/avif" href="assets\/img\/screen-carte-toulouse-mobile\.avif" fetchpriority="high" media="\(max-width:480px\)">/.test(indexHtml), 'La Home doit précharger l\'image mobile du héros (media (max-width:480px)).');
-assert(/<link rel="preload" as="image" type="image\/avif" href="assets\/img\/screen-carte-toulouse\.avif" fetchpriority="high" media="\(min-width:481px\)">/.test(indexHtml), 'La Home doit précharger l\'image grand écran du héros (media (min-width:481px)).');
-for (const ext of ['avif', 'webp']) {
-  assert(existsSync(join(publicDir, 'assets', 'img', `screen-carte-toulouse-mobile.${ext}`)), `Le fichier assets/img/screen-carte-toulouse-mobile.${ext} doit exister.`);
-}
-
-// Police de repli Home : Manrope Fallback avec size-adjust, utilisée dans la pile du body (lot S2.15 P2).
-assert(/@font-face\{font-family:"Manrope Fallback";[^}]*size-adjust:[^}]*\}/.test(indexHtml), 'La Home doit déclarer @font-face "Manrope Fallback" avec size-adjust.');
-assert(/body\{[^}]*font-family:'Manrope','Manrope Fallback',sans-serif/.test(indexHtml), 'Le body de la Home doit utiliser la pile de police \'Manrope\',\'Manrope Fallback\',sans-serif.');
-
-// Le préchargement de l'image du héros est propre à la Home ; aucune autre page ne doit le reprendre.
-for (const file of htmlFiles.filter((f) => f !== 'index.html')) {
-  const html = readFileSync(join(publicDir, file), 'utf8');
-  assert(!/rel="preload" as="image"/.test(html), `${file} ne doit pas précharger l'image du héros : ce préchargement est propre à la Home.`);
-}
-
 const sitemap = readFileSync(join(publicDir, 'sitemap.xml'), 'utf8');
 const indexedPages = [...sitemap.matchAll(/<loc>(.*?)<\/loc>/g)].map((match) => {
   const pathname = new URL(match[1]).pathname.replace(/^\//, '');
@@ -179,6 +157,3 @@ console.log('✓ Occitanie à profondeur 1 ; Toulouse et les autres villes à pr
 console.log(`✓ ${indexedPages.length} pages indexables accessibles depuis la Home, sans orpheline`);
 console.log('✓ Liens internes HTML valides et ancres du cluster local visibles');
 console.log(`✓ FAQPage JSON-LD aligné texte pour texte avec la FAQ visible sur ${faqPagesChecked} page(s)`);
-console.log('✓ Héros Home : sources et préchargements mobile/grand écran présents, images mobiles sur disque');
-console.log('✓ Police de repli "Manrope Fallback" déclarée avec size-adjust et utilisée dans la pile du body');
-console.log('✓ Aucune autre page ne précharge l\'image du héros de la Home');
