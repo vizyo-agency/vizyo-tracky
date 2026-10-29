@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Tracky — Pourquoi un véhicule reste coupé le matin</title>
+<!--
+  Scène animée du tutoriel « véhicule resté coupé le matin » (popup d'annonce gel-veilleur-2026-10).
+  Autonome : aucune ressource externe, aucune bibliothèque. Affichée en iframe de même origine, 16/9.
+  Tout est dimensionné en rem, et 1 rem = 1/40 de la largeur de la scène : la scène mesure donc
+  toujours 40 rem sur 22,5 rem. Grille verticale (rem, depuis le haut) :
+    0 – 2,8    en-tête
+    3,2 – 5,8  pastille d'état
+    7,1 – 9,0  étiquettes, rangée haute (coupe manuelle)
+    9,3 – 11,2 étiquettes, rangée basse (22h, 7h, journée)
+    11,6 – 12,7 frise     13,0 – 14,4 heures
+    15,6 – 19,5 légende   21,3 points de progression
+  Cinq scènes qui bouclent ; la scène courante est portée par data-s sur .stage.
+-->
+<style>
+  :root {
+    --bg: #080b0a; --surface: #101514; --surface2: #1b2421; --line: rgba(255,255,255,.18);
+    --tx: #eaefed; --tx2: #a9b3af; --ok: #10e0a0; --ok-ink: #04130d;
+    --cut: #ff6b6b; --auto: #f5b942;
+  }
+  html { font-size: min(2.5vw, 4.444vh); }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  body { font-family: Manrope, system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--tx); -webkit-font-smoothing: antialiased; }
+  .stage { position: fixed; inset: 0; }
+
+  header { position: absolute; left: 2rem; right: 2rem; top: 1.2rem; display: flex; align-items: center; justify-content: space-between; font-size: 1.1rem; }
+  .brand { font-weight: 800; color: var(--ok); text-transform: uppercase; letter-spacing: .14em; }
+  .plate { font-weight: 800; color: var(--tx); background: var(--surface2); border: 1px solid var(--line); border-radius: .5rem; padding: .2rem .7rem; letter-spacing: .08em; }
+
+  .view { position: absolute; left: 2rem; right: 2rem; top: 3.2rem; opacity: 0; pointer-events: none; transition: opacity .45s ease; }
+  .v-tl { height: 12rem; }
+  .v-fix { bottom: 2.6rem; display: flex; flex-direction: column; justify-content: center; gap: 1rem; }
+  .stage[data-s="0"] .v-tl, .stage[data-s="1"] .v-tl, .stage[data-s="2"] .v-tl, .stage[data-s="3"] .v-tl,
+  .stage[data-s="4"] .v-fix { opacity: 1; }
+
+  /* ── Pastille d'état ─────────────────────────────────────────────── */
+  .chip { display: inline-flex; align-items: center; gap: .6rem; font-size: 1.45rem; font-weight: 800; white-space: nowrap; padding: .4rem 1.1rem; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); }
+  .chip i { width: .9rem; height: .9rem; border-radius: 50%; background: var(--auto); }
+  .chip .t { display: none; }
+  .stage[data-s="0"] .t0, .stage[data-s="1"] .t1, .stage[data-s="2"] .t2, .stage[data-s="3"] .t3 { display: inline; }
+  .stage[data-s="1"] .chip i, .stage[data-s="2"] .chip i, .stage[data-s="3"] .chip i { background: var(--cut); }
+
+  /* ── Frise 22h → 18h : 39 rem de large, 1 % = 0,39 rem ───────────── */
+  .tl { position: absolute; left: .5rem; right: .5rem; top: 3.9rem; height: 7.3rem; }
+  .track { position: absolute; left: 0; right: 0; top: 4.5rem; height: 1.1rem; border-radius: .55rem; background: var(--surface2); border: 1px solid var(--line); }
+  .jour { position: absolute; left: 45%; right: 0; top: -.3rem; bottom: -.3rem; border-radius: .4rem; opacity: 0; transition: opacity .5s;
+          background: repeating-linear-gradient(135deg, rgba(255,107,107,.22) 0 .4rem, transparent .4rem .8rem); }
+  .stage[data-s="3"] .jour { opacity: 1; }
+  .band { position: absolute; left: 0; top: 0; bottom: 0; width: 3%; border-radius: .55rem; background: var(--auto); transition: width 1.6s cubic-bezier(.4,0,.2,1), background .5s; }
+  .stage[data-s="1"] .band { background: var(--cut); width: 26.25%; }
+  .stage[data-s="2"] .band { background: var(--cut); width: 45%; }
+  .stage[data-s="3"] .band { background: var(--cut); width: 100%; }
+  .cur { position: absolute; top: -.5rem; width: .3rem; height: 2.1rem; margin-left: -.15rem; border-radius: .15rem; background: var(--tx); left: 0; transition: left 1.6s cubic-bezier(.4,0,.2,1); }
+  .stage[data-s="1"] .cur { left: 26.25%; }
+  .stage[data-s="2"] .cur { left: 45%; }
+  .stage[data-s="3"] .cur { left: 100%; }
+
+  .tick { position: absolute; top: 5.9rem; transform: translateX(-50%); font-size: 1.1rem; font-weight: 700; color: var(--tx2); white-space: nowrap; }
+  .tick.first { transform: none; }
+  .tick.last { transform: translateX(-100%); }
+
+  /* Étiquettes : rangée basse (.a) juste au-dessus de la frise, rangée haute (.b) au-dessus. */
+  .flag { position: absolute; transform: translateX(-50%); white-space: nowrap; font-size: 1.05rem; font-weight: 800; line-height: 1.2; padding: .3rem .8rem; border-radius: .5rem;
+          background: var(--surface); border: 1px solid var(--line); opacity: 0; transition: opacity .5s; }
+  .flag::after { content: ""; position: absolute; left: 50%; width: .12rem; margin-left: -.06rem; background: var(--line); top: 100%; }
+  .flag.a { top: 1.9rem; }  .flag.a::after { height: .5rem; }
+  .flag.b { top: -.3rem; }  .flag.b::after { height: 2.7rem; }
+  .f-auto { left: 0; transform: none; color: var(--auto); border-color: color-mix(in srgb, var(--auto) 50%, transparent); }
+  .f-auto::after { left: .9rem; }
+  .f-man { left: 26.25%; color: var(--cut); border-color: color-mix(in srgb, var(--cut) 60%, transparent); }
+  .f-rep { left: 45%; color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+  .f-rep .r { display: none; }
+  .stage[data-s="0"] .f-auto, .stage[data-s="0"] .f-rep { opacity: 1; }
+  .stage[data-s="1"] .f-man, .stage[data-s="2"] .f-man, .stage[data-s="3"] .f-man { opacity: 1; }
+  .stage[data-s="1"] .f-rep, .stage[data-s="2"] .f-rep, .stage[data-s="3"] .f-rep { opacity: 1; color: var(--cut); border-color: color-mix(in srgb, var(--cut) 60%, transparent); }
+  .stage[data-s="0"] .r0, .stage[data-s="1"] .r1, .stage[data-s="2"] .r2, .stage[data-s="3"] .r2 { display: inline; }
+  .stage[data-s="2"] .r2, .stage[data-s="3"] .r2 { text-decoration: line-through; text-decoration-thickness: .15rem; }
+  .f-jour { left: 72.5%; color: var(--cut); border-color: color-mix(in srgb, var(--cut) 60%, transparent); }
+  .f-jour::after { display: none; }
+  .stage[data-s="3"] .f-jour { opacity: 1; transition-delay: .8s; }
+
+  /* ── Que faire ───────────────────────────────────────────────────── */
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 1rem; padding: .9rem 1.3rem; }
+  .card h3 { margin: 0 0 .3rem; font-size: 1.35rem; font-weight: 800; color: var(--ok); }
+  .card p { margin: 0; font-size: 1.3rem; line-height: 1.4; color: var(--tx); }
+  .card em { font-style: normal; font-weight: 800; color: var(--ok); }
+  .btn { display: inline-block; font-size: 1.15rem; font-weight: 800; padding: .1rem .7rem; border-radius: .5rem; background: var(--ok); color: var(--ok-ink); }
+
+  /* ── Légende + points ────────────────────────────────────────────── */
+  .cap { position: absolute; left: 2rem; right: 2rem; top: 15.6rem; margin: 0; font-size: 1.7rem; font-weight: 800; line-height: 1.25; letter-spacing: -.01em; }
+  .cap span { display: none; }
+  .stage[data-s="0"] .c0, .stage[data-s="1"] .c1, .stage[data-s="2"] .c2, .stage[data-s="3"] .c3 { display: block; }
+  .cap small { display: block; margin-top: .3rem; font-size: 1.2rem; font-weight: 600; line-height: 1.3; color: var(--tx2); letter-spacing: 0; }
+  .dots { position: absolute; left: 2rem; top: 21.3rem; display: flex; gap: .5rem; }
+  .dots b { width: 1.5rem; height: .3rem; border-radius: .15rem; background: var(--line); transition: background .3s; }
+  .stage[data-s="0"] .dots b:nth-child(1), .stage[data-s="1"] .dots b:nth-child(2), .stage[data-s="2"] .dots b:nth-child(3),
+  .stage[data-s="3"] .dots b:nth-child(4), .stage[data-s="4"] .dots b:nth-child(5) { background: var(--ok); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="stage" data-s="0" id="stage">
+  <header><span class="brand">Tracky · Tutoriel</span><span class="plate">HM-738-GA</span></header>
+
+  <section class="view v-tl" aria-hidden="true">
+    <div class="chip"><i></i>
+      <b class="t t0">Coupé · horaire automatique</b>
+      <b class="t t1">Coupé · à la main (veilleur)</b>
+      <b class="t t2">Toujours coupé</b>
+      <b class="t t3">Coupé en pleine journée</b>
+    </div>
+    <div class="tl">
+      <div class="flag a f-auto">22h · coupe auto</div>
+      <div class="flag b f-man">3h15 · coupe manuelle</div>
+      <div class="flag a f-rep"><span class="r r0">7h · remise en service</span><span class="r r1">7h · suspendue</span><span class="r r2">7h · annulée</span></div>
+      <div class="flag a f-jour">coupé toute la journée</div>
+      <div class="track"><div class="jour"></div><div class="band"></div><div class="cur"></div></div>
+      <span class="tick first" style="left:0">22h</span>
+      <span class="tick" style="left:26.25%">3h15</span>
+      <span class="tick" style="left:45%">7h</span>
+      <span class="tick" style="left:70%">12h</span>
+      <span class="tick last" style="left:100%">18h</span>
+    </div>
+  </section>
+
+  <section class="view v-fix" aria-hidden="true">
+    <div class="card"><h3>Veilleur</h3><p>Après une coupe manuelle de nuit, <em>rallumez le véhicule avant 7h</em>.</p></div>
+    <div class="card"><h3>Équipes de jour</h3><p>Véhicule encore coupé ? Horaires flotte, puis <span class="btn">Réactiver</span></p></div>
+  </section>
+
+  <p class="cap">
+    <span class="c0">22h : l'horaire automatique coupe le véhicule.</span>
+    <span class="c1">3h15 : le veilleur coupe à la main.<small>L'horaire automatique de ce véhicule est alors suspendu.</small></span>
+    <span class="c2">7h : la remise en service n'a pas lieu.</span>
+    <span class="c3">Le véhicule reste coupé toute la journée.<small>Ce n'est pas une panne.</small></span>
+  </p>
+  <div class="dots" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b></div>
+</div>
+<script>
+  (function () {
+    var stage = document.getElementById('stage');
+    // Durée de chaque scène, en secondes ; la dernière laisse le temps de lire les deux consignes.
+    var durees = [4.5, 5.5, 4.5, 5.5, 7];
+    var i = 0;
+    function suivante() {
+      stage.setAttribute('data-s', String(i));
+      var d = durees[i] * 1000;
+      i = (i + 1) % durees.length;
+      setTimeout(suivante, d);
+    }
+    suivante();
+  })();
+</script>
+</body>
+</html>

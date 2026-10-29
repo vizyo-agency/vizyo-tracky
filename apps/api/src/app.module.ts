@@ -50,6 +50,7 @@ import { CacheModule } from './common/cache/cache.module';
 import { OwnerVisibilityModule } from './common/owner-visibility.module';
 import { EmailModule } from './email/email.module';
 import { CommunicationsModule } from './communications/communications.module';
+import { AnnouncementsModule } from './announcements/announcements.module';
 import { InvitationsModule } from './invitations/invitations.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { DepotModule } from './depot/depot.module';
@@ -145,6 +146,7 @@ import { DemoModule } from './demo/demo.module';
     BackupHealthModule,
     EmailModule,
     CommunicationsModule,
+    AnnouncementsModule,
     InvitationsModule,
     NotificationsModule,
     ReportsModule,
