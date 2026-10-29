@@ -138,7 +138,11 @@ export class WebPushService {
     const privateKey = this.config.get('VAPID_PRIVATE_KEY', { infer: true });
     const subject = this.config.get('VAPID_SUBJECT', { infer: true });
     this.enabled = !!(this.publicKey && privateKey);
-    this.seulsAutorises = listeBlanchePush(this.config.get('PUSH_ONLY_EMAILS', { infer: true }));
+    // L'interrupteur général (`NOTIFS_ONLY_EMAILS`, tous canaux) et l'ancien (`PUSH_ONLY_EMAILS`, push seul) s'ajoutent.
+    this.seulsAutorises = [
+      ...listeBlanchePush(this.config.get('PUSH_ONLY_EMAILS', { infer: true })),
+      ...listeBlanchePush(this.config.get('NOTIFS_ONLY_EMAILS', { infer: true })),
+    ];
     if (this.seulsAutorises.length > 0) {
       this.logger.warn(
         `[push] INTERRUPTEUR DE SÛRETÉ ACTIF — seuls ${this.seulsAutorises.length} compte(s) reçoivent des notifications (PUSH_ONLY_EMAILS)`,

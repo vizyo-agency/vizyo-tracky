@@ -6,6 +6,7 @@ import type { AuthUser } from '../auth/types/auth-user';
 import type { Env } from '../config/env.validation';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemActivityService } from '../system-activity/system-activity.service';
+import { listeBlancheNotifs, MODELES_EMAIL_EXEMPTES } from '../notifications/interrupteur-notifications';
 
 /**
  * ══ LE GARDE-FOU D'ENVOI (30/09) ═══════════════════════════════════════════════════════════
@@ -100,6 +101,8 @@ export const heureParis = (ms: number): string => HEURE_PARIS.format(ms).replace
 export class GardeFouEnvoisService {
   private readonly logger = new Logger(GardeFouEnvoisService.name);
   private readonly liste: ListeBlanche | null;
+  /** Interrupteur de sûreté (29/10) : si non vide, SEULS ces e-mails reçoivent un courriel de notification. */
+  private readonly seulsNotifs: string[];
   private readonly cache = new Map<string, { jusqua: number | null; lu: number }>();
 
   constructor(
@@ -107,6 +110,12 @@ export class GardeFouEnvoisService {
     private readonly prisma: PrismaService,
     @Optional() private readonly systemActivity?: SystemActivityService,
   ) {
+    this.seulsNotifs = listeBlancheNotifs(config.get('NOTIFS_ONLY_EMAILS', { infer: true }));
+    if (this.seulsNotifs.length > 0) {
+      this.logger.warn(
+        `[notifs] INTERRUPTEUR DE SÛRETÉ ACTIF — seuls ${this.seulsNotifs.length} compte(s) reçoivent des courriels (NOTIFS_ONLY_EMAILS).`,
+      );
+    }
     this.liste = lireListeBlanche(config.get('EMAIL_LISTE_BLANCHE', { infer: true }));
     if (this.liste) {
       const vue = [...this.liste.adresses, ...this.liste.domaines.map((d) => `@${d}`)].join(', ');
@@ -132,6 +141,15 @@ export class GardeFouEnvoisService {
     fleetId?: string | null;
     modele?: string | null;
   }): Promise<string | null> {
+    // 29/10 — INTERRUPTEUR DE SÛRETÉ des notifications (cf. `interrupteur-notifications.ts`) : seuls les
+    // comptes de `NOTIFS_ONLY_EMAILS` reçoivent un courriel. Les courriels de porte du compte sont exemptés.
+    if (this.seulsNotifs.length > 0 && p.canal === 'email' && !(p.modele && MODELES_EMAIL_EXEMPTES.has(p.modele))) {
+      const seuls = this.seulsNotifs;
+      const destinataires = p.destinataire.split(',').map((d) => d.trim()).filter(Boolean);
+      const horsListe = destinataires.length === 0
+        || destinataires.some((d) => !dansLaListeBlanche({ adresses: new Set(seuls), domaines: [] }, d));
+      if (horsListe) return 'interrupteur de sûreté des notifications (NOTIFS_ONLY_EMAILS)';
+    }
     if (this.liste && p.canal === 'email') {
       // Plusieurs destinataires séparés par des virgules : TOUS doivent être dans la liste.
       const liste = this.liste;

@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { toE164 } from '../common/utils/phone';
 import type { SmsTemplateId } from '../communications/communications.catalog';
 import { SystemActivityService } from '../system-activity/system-activity.service';
+import { listeBlancheNotifs, memeNumero, MODELES_SMS_UTILISATEURS } from '../notifications/interrupteur-notifications';
 import { AllowlistService } from './allowlist.service';
 
 /**
@@ -242,6 +243,8 @@ export class SmsGatewayService implements OnModuleInit {
   private queuedForDispatch = 0;
   private nextDispatchAt = 0;
   private readonly minIntervalMs: number;
+  /** Interrupteur de sûreté (29/10) : si non vide, seuls ces comptes reçoivent un SMS destiné à une personne. */
+  private readonly seulsNotifs: string[];
 
   // Provider actif : vizyo-texto (passerelle SMS maison) > twilio (legacy/fallback) > noop.
   private readonly provider: 'vizyo-texto' | 'twilio' | 'noop';
@@ -266,6 +269,12 @@ export class SmsGatewayService implements OnModuleInit {
      */
     @Optional() @Inject(AllowlistService) private readonly allowlist?: AllowlistService,
   ) {
+    this.seulsNotifs = listeBlancheNotifs(this.config?.get('NOTIFS_ONLY_EMAILS', { infer: true }));
+    if (this.seulsNotifs.length > 0) {
+      this.logger.warn(
+        `[notifs] INTERRUPTEUR DE SÛRETÉ ACTIF — seuls ${this.seulsNotifs.length} compte(s) reçoivent des SMS de notification (NOTIFS_ONLY_EMAILS)`,
+      );
+    }
     this.textoUrl = (this.config?.get('VIZYO_TEXTO_URL', { infer: true }) ?? '').replace(/\/+$/, '');
     this.textoApiKey = this.config?.get('VIZYO_TEXTO_API_KEY', { infer: true }) ?? '';
 
@@ -746,6 +755,36 @@ export class SmsGatewayService implements OnModuleInit {
     // On NORMALISE ici plutôt que de rejeter : si un autre chemin écrit un numéro brut un jour, le
     // SMS partira quand même. `toE164` reste prudent (un numéro national n'est jamais préfixé).
     const normalized = toE164(to) ?? to;
+    // 29/10 — INTERRUPTEUR DE SÛRETÉ des notifications : un SMS destiné à une PERSONNE (alerte, réservation
+    // publique) ne part que vers un compte de `NOTIFS_ONLY_EMAILS`. Les SMS de commande adressés à un boîtier
+    // ne sont JAMAIS retenus ici (liste fermée de modèles, `MODELES_SMS_UTILISATEURS`).
+    if (this.seulsNotifs.length > 0 && MODELES_SMS_UTILISATEURS.has(context.template)) {
+      let autorise = false;
+      try {
+        const comptes = await this.prisma.user.findMany({
+          where: { email: { in: this.seulsNotifs, mode: 'insensitive' } },
+          select: { phone: true },
+        });
+        autorise = comptes.some((c) => !!c.phone && memeNumero(c.phone, normalized));
+      } catch (err) {
+        // Échec FERMÉ : numéros illisibles → rien ne part.
+        this.logger.error(`[notifs] interrupteur de sûreté : comptes illisibles, SMS retenu : ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (!autorise) {
+        this.logger.log(`[notifs] SMS RETENU par l'interrupteur de sûreté (${context.template}) → ${maskPhone(normalized)}`);
+        this.systemActivity.record({
+          category: 'SMS',
+          action: 'sms_retenu',
+          status: 'SKIPPED',
+          actor: 'system',
+          target: maskPhone(normalized),
+          detail: `SMS (${context.template}) retenu : interrupteur de sûreté des notifications (NOTIFS_ONLY_EMAILS)`,
+          meta: { template: context.template, motif: 'NOTIFS_ONLY_EMAILS' },
+        });
+        // `ok: true` : ce n'est pas une panne, rien à rejouer ni à signaler au centre d'alerte.
+        return { ok: true, outcome: 'accepted', submittedStatus: 'retenu' };
+      }
+    }
     const priority = context['priority'] === 'critical_restore'
       ? 100
       : context.template === 'engine_control_fallback'

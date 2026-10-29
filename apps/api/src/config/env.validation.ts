@@ -169,6 +169,9 @@ const envSchema = z.object({
   // les notifications push ne partent QU'À ces comptes : tous les autres sont écartés, sans toucher à leurs
   // abonnements (la levée est immédiate : vider la variable). Vide = comportement normal.
   PUSH_ONLY_EMAILS: z.string().default(''),
+  // INTERRUPTEUR DE SÛRETÉ DES NOTIFICATIONS (29/10/2026) — même principe, pour TOUS les canaux (push, e-mail,
+  // SMS destinés aux personnes). Les comptes listés reçoivent normalement ; personne d'autre. Vide = normal.
+  NOTIFS_ONLY_EMAILS: z.string().default(''),
 
   /**
    * Périmètre de déploiement du push d'alerte.
