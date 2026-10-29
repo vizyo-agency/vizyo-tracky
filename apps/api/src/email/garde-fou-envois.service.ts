@@ -6,7 +6,7 @@ import type { AuthUser } from '../auth/types/auth-user';
 import type { Env } from '../config/env.validation';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemActivityService } from '../system-activity/system-activity.service';
-import { listeBlancheNotifs, MODELES_EMAIL_EXEMPTES } from '../notifications/interrupteur-notifications';
+import { listeBlancheNotifs, MODELES_EMAIL_AUTOMATIQUES } from '../notifications/interrupteur-notifications';
 
 /**
  * ══ LE GARDE-FOU D'ENVOI (30/09) ═══════════════════════════════════════════════════════════
@@ -141,9 +141,10 @@ export class GardeFouEnvoisService {
     fleetId?: string | null;
     modele?: string | null;
   }): Promise<string | null> {
-    // 29/10 — INTERRUPTEUR DE SÛRETÉ des notifications (cf. `interrupteur-notifications.ts`) : seuls les
-    // comptes de `NOTIFS_ONLY_EMAILS` reçoivent un courriel. Les courriels de porte du compte sont exemptés.
-    if (this.seulsNotifs.length > 0 && p.canal === 'email' && !(p.modele && MODELES_EMAIL_EXEMPTES.has(p.modele))) {
+    // 29/10 — INTERRUPTEUR DE SÛRETÉ des notifications (cf. `interrupteur-notifications.ts`) : les courriels
+    // AUTOMATIQUES (alerte, rapport du lundi…) ne partent que vers `NOTIFS_ONLY_EMAILS`. Tout courriel qu'un
+    // humain déclenche — invitation, mot de passe, mission, créneau, devis — part comme avant.
+    if (this.seulsNotifs.length > 0 && p.canal === 'email' && !!p.modele && MODELES_EMAIL_AUTOMATIQUES.has(p.modele)) {
       const seuls = this.seulsNotifs;
       const destinataires = p.destinataire.split(',').map((d) => d.trim()).filter(Boolean);
       const horsListe = destinataires.length === 0

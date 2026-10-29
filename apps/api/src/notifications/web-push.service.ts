@@ -5,6 +5,7 @@ import webpush, { PushSubscription as WebPushSubscription } from 'web-push';
 import type { Env } from '../config/env.validation';
 import type { PushTemplateId } from '../communications/communications.catalog';
 import { PrismaService } from '../prisma/prisma.service';
+import { MODELES_PUSH_AUTOMATIQUES } from './interrupteur-notifications';
 import { SystemActivityService } from '../system-activity/system-activity.service';
 
 /**
@@ -407,7 +408,9 @@ export class WebPushService {
     // la liste blanche. Demandé par le propriétaire pour corriger des bugs sans spammer les utilisateurs.
     // ⚠️ Échec FERMÉ : si les comptes ne peuvent pas être résolus, RIEN ne part — mieux vaut une notification
     // de moins qu'une de trop. Les abonnements ne sont ni supprimés ni modifiés : vider la variable suffit.
-    if (this.seulsAutorises.length > 0) {
+    // Seules les notifications AUTOMATIQUES sont écartées (alerte, rappel, rapport, avis système) ; un push
+    // qui découle d'un geste humain (demande à valider, assistance, test admin) part comme avant.
+    if (this.seulsAutorises.length > 0 && MODELES_PUSH_AUTOMATIQUES.has(payload.template)) {
       let autorises: Set<string>;
       try {
         const ids = [...new Set(subs.map((s) => s.userId ?? fallbackUserId).filter((i): i is string => !!i))];

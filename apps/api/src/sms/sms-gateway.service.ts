@@ -9,7 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { toE164 } from '../common/utils/phone';
 import type { SmsTemplateId } from '../communications/communications.catalog';
 import { SystemActivityService } from '../system-activity/system-activity.service';
-import { listeBlancheNotifs, memeNumero, MODELES_SMS_UTILISATEURS } from '../notifications/interrupteur-notifications';
+import { listeBlancheNotifs, memeNumero, MODELES_SMS_AUTOMATIQUES } from '../notifications/interrupteur-notifications';
 import { AllowlistService } from './allowlist.service';
 
 /**
@@ -755,10 +755,10 @@ export class SmsGatewayService implements OnModuleInit {
     // On NORMALISE ici plutôt que de rejeter : si un autre chemin écrit un numéro brut un jour, le
     // SMS partira quand même. `toE164` reste prudent (un numéro national n'est jamais préfixé).
     const normalized = toE164(to) ?? to;
-    // 29/10 — INTERRUPTEUR DE SÛRETÉ des notifications : un SMS destiné à une PERSONNE (alerte, réservation
-    // publique) ne part que vers un compte de `NOTIFS_ONLY_EMAILS`. Les SMS de commande adressés à un boîtier
-    // ne sont JAMAIS retenus ici (liste fermée de modèles, `MODELES_SMS_UTILISATEURS`).
-    if (this.seulsNotifs.length > 0 && MODELES_SMS_UTILISATEURS.has(context.template)) {
+    // 29/10 — INTERRUPTEUR DE SÛRETÉ des notifications : un SMS d'ALERTE destiné à une PERSONNE ne part que
+    // vers un compte de `NOTIFS_ONLY_EMAILS`. Les SMS de commande adressés à un boîtier ne sont JAMAIS
+    // retenus ici (liste fermée de modèles, `MODELES_SMS_AUTOMATIQUES`).
+    if (this.seulsNotifs.length > 0 && MODELES_SMS_AUTOMATIQUES.has(context.template)) {
       let autorise = false;
       try {
         const comptes = await this.prisma.user.findMany({

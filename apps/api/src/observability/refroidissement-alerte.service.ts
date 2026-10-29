@@ -257,4 +257,11 @@ export const CLES_REFROIDISSEMENT = {
    * comparer ce qui a changé.* Ici, c'est le changement lui-même qui déclenche.
    */
   SENTINELLE_BOITIERS_MUETS: 'sentinelle-boitiers-muets',
+  /**
+   * 29/10/2026 — UNE NOTIFICATION AUTOMATIQUE EST PARTIE VERS UN COMPTE HORS LISTE alors que
+   * l'interrupteur de sûreté (`NOTIFS_ONLY_EMAILS`) devait la retenir. PRÉFIXE, suffixé
+   * `:<canal>` (`push` | `email` | `sms`) : un push qui fuit ne doit pas faire taire un SMS.
+   * Une ligne par canal et par heure au plus — la fuite persistante se rappelle, elle ne se répète pas.
+   */
+  SENTINELLE_NOTIF_INTERDITE: 'sentinelle-notif-interdite',
 } as const;

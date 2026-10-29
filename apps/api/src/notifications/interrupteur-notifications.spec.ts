@@ -1,14 +1,14 @@
 import { GardeFouEnvoisService } from '../email/garde-fou-envois.service';
 import { SmsGatewayService } from '../sms/sms-gateway.service';
-import { chiffresDuNumero, listeBlancheNotifs, memeNumero, MODELES_EMAIL_EXEMPTES, MODELES_SMS_UTILISATEURS } from './interrupteur-notifications';
+import { adresseNue, chiffresDuNumero, listeBlancheNotifs, memeNumero, MODELES_EMAIL_AUTOMATIQUES, MODELES_PUSH_AUTOMATIQUES, MODELES_SMS_AUTOMATIQUES } from './interrupteur-notifications';
 
 /**
  * ══ INTERRUPTEUR DE SÛRETÉ — E-MAIL ET SMS (29/10/2026) ═══════════════════════════════════════
  *
- * Aucun utilisateur ne reçoit de notification sauf les comptes de `NOTIFS_ONLY_EMAILS`. Ces tests
- * tiennent surtout ce qui ne doit JAMAIS être retenu : les courriels de porte du compte (sinon on
- * enferme les gens dehors) et les SMS de COMMANDE adressés aux boîtiers (sinon on désarme le
- * coupe-circuit).
+ * Aucune notification AUTOMATIQUE (alerte, rapport du lundi…) n'est reçue sauf par les comptes de
+ * `NOTIFS_ONLY_EMAILS`. Ces tests tiennent surtout ce qui ne doit JAMAIS être retenu : tout courriel
+ * qu'un humain déclenche (invitation, mot de passe, mission, créneau, devis) et les SMS de COMMANDE
+ * adressés aux boîtiers (sinon on désarme le coupe-circuit).
  */
 const ADMIN = 'admin@vizyoagency.com';
 
@@ -31,22 +31,39 @@ describe('listeBlancheNotifs / numéros', () => {
   });
   it('🔴 les SMS de commande aux boîtiers ne sont PAS dans la liste des SMS retenus', () => {
     for (const t of ['engine_control_fallback', 'tracker_provisioning', 'fix_mode_fallback', 'audio_arm', 'audio_disarm', 'tracker_command_sms', 'sim_direct', 'gateway_heartbeat']) {
-      expect(MODELES_SMS_UTILISATEURS.has(t)).toBe(false);
+      expect(MODELES_SMS_AUTOMATIQUES.has(t)).toBe(false);
     }
   });
-  it('🔴 les courriels de porte du compte sont exemptés', () => {
-    for (const t of ['password_reset', 'device_verification', 'two_factor_disable']) expect(MODELES_EMAIL_EXEMPTES.has(t)).toBe(true);
+  it('🔴 les courriels déclenchés par un humain ne sont PAS retenus (invitation en tête)', () => {
+    for (const t of ['invitation', 'password_reset', 'device_verification', 'two_factor_disable', 'mission_assigned', 'mission_tournee_modifiee', 'mission_request', 'reservation_request_pending', 'installation_slot_requested', 'installation_slot_confirmed', 'partner_consent_invitation', 'lead', 'quote_client']) {
+      expect(MODELES_EMAIL_AUTOMATIQUES.has(t)).toBe(false);
+    }
+  });
+  it('les notifications automatiques sont bien dans les listes', () => {
+    expect(MODELES_EMAIL_AUTOMATIQUES.has('alert')).toBe(true);
+    expect(MODELES_EMAIL_AUTOMATIQUES.has('weekly_report')).toBe(true);
+    expect(MODELES_SMS_AUTOMATIQUES.has('alert_notification')).toBe(true);
+    expect(MODELES_SMS_AUTOMATIQUES.has('alert_whatsapp')).toBe(true);
+    expect(MODELES_PUSH_AUTOMATIQUES.has('alert')).toBe(true);
+  });
+  it('adresseNue lit « Nom <a@x.fr> » et « A@X.fr »', () => {
+    expect(adresseNue('Admin <Admin@VizyoAgency.com>')).toBe(ADMIN);
+    expect(adresseNue(' A@X.fr ')).toBe('a@x.fr');
   });
 });
 
 describe('Interrupteur — e-mail (GardeFouEnvoisService)', () => {
-  it('🔴 liste active : un autre destinataire est retenu, sauf si le modèle est exempté', async () => {
+  it('🔴 liste active : une notification AUTOMATIQUE vers un autre destinataire est retenue', async () => {
     const g = garde(ADMIN);
     expect(await g.motifDeRetenue({ canal: 'email', destinataire: 'remy@a2r.test', modele: 'alert' })).toMatch(/NOTIFS_ONLY_EMAILS/);
     expect(await g.motifDeRetenue({ canal: 'email', destinataire: 'remy@a2r.test', modele: 'weekly_report' })).toMatch(/NOTIFS_ONLY_EMAILS/);
-    expect(await g.motifDeRetenue({ canal: 'email', destinataire: 'remy@a2r.test', modele: null })).toMatch(/NOTIFS_ONLY_EMAILS/);
-    expect(await g.motifDeRetenue({ canal: 'email', destinataire: 'remy@a2r.test', modele: 'password_reset' })).toBeNull();
-    expect(await g.motifDeRetenue({ canal: 'email', destinataire: 'remy@a2r.test', modele: 'device_verification' })).toBeNull();
+    expect(await g.motifDeRetenue({ canal: 'email', destinataire: 'remy@a2r.test', modele: 'depot_incident' })).toMatch(/NOTIFS_ONLY_EMAILS/);
+  });
+  it('🔴 liste active : tout courriel déclenché par un humain PART (invitation, mot de passe, mission, créneau…)', async () => {
+    const g = garde(ADMIN);
+    for (const modele of ['invitation', 'password_reset', 'device_verification', 'mission_assigned', 'installation_slot_confirmed', 'reservation_request_pending', null]) {
+      expect(await g.motifDeRetenue({ canal: 'email', destinataire: 'remy@a2r.test', modele })).toBeNull();
+    }
   });
   it('le compte autorisé reçoit, casse et « Nom <adresse> » compris', async () => {
     const g = garde(ADMIN);
@@ -91,6 +108,12 @@ describe('Interrupteur — SMS (SmsGatewayService)', () => {
   it('🔴 une COMMANDE à un boîtier n’est jamais retenue, liste active ou non', async () => {
     const { service, prisma } = sms(ADMIN, []);
     const r = await service.send('+34590103060', 'cmd', { template: 'engine_control_fallback' });
+    expect(r.submittedStatus).not.toBe('retenu');
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+  });
+  it('🔴 un SMS déclenché par un humain (réservation publique) PART, liste active', async () => {
+    const { service, prisma } = sms(ADMIN, []);
+    const r = await service.send('+33699999999', 'Votre réservation', { template: 'reservation_public' });
     expect(r.submittedStatus).not.toBe('retenu');
     expect(prisma.user.findMany).not.toHaveBeenCalled();
   });

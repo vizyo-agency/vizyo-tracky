@@ -16,7 +16,8 @@ jest.mock('web-push', () => ({
 
 const ADMIN = 'admin@vizyoagency.com';
 const subDe = (userId: string, n = 1) => ({ id: `sub-${userId}-${n}`, endpoint: `https://push.example.test/${userId}/${n}`, p256dh: 'k', auth: 'a', userId });
-const payload = { title: 'Alerte', body: 'Corps', template: 'test' } as never;
+const payload = { title: 'Alerte', body: 'Corps', template: 'alert' } as never;
+const payloadHumain = { title: 'Demande', body: 'Corps', template: 'assistance' } as never;
 
 function monter(listeBlanche: string, comptes: Array<{ id: string; email: string }>) {
   const prisma = {
@@ -27,8 +28,8 @@ function monter(listeBlanche: string, comptes: Array<{ id: string; email: string
   const env: Record<string, string> = { VAPID_PUBLIC_KEY: 'pub', VAPID_PRIVATE_KEY: 'priv', VAPID_SUBJECT: 'mailto:a@b.test', PUSH_ONLY_EMAILS: listeBlanche };
   const config = { get: (k: string) => env[k] } as unknown as ConfigService<never, true>;
   const service = new WebPushService(prisma as never, config as never, { record: jest.fn() } as never);
-  const envoyer = (subs: ReturnType<typeof subDe>[]) =>
-    (service as unknown as { sendToSubscriptions: (...a: unknown[]) => Promise<{ sent: number }> }).sendToSubscriptions(subs, payload, 'test', 'push_sent', null, null);
+  const envoyer = (subs: ReturnType<typeof subDe>[], contenu: unknown = payload) =>
+    (service as unknown as { sendToSubscriptions: (...a: unknown[]) => Promise<{ sent: number }> }).sendToSubscriptions(subs, contenu, 'test', 'push_sent', null, null);
   return { prisma, envoyer };
 }
 
@@ -79,6 +80,20 @@ describe('WebPushService — interrupteur de sûreté', () => {
     await envoyer([subDe('remy')]);
     expect(prisma.pushSubscription.delete).not.toHaveBeenCalled();
     expect(prisma.pushSubscription.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('🔴 un push qui découle d’un geste humain (assistance, demande à valider) PART, liste active ou non', async () => {
+    const { prisma, envoyer } = monter(ADMIN, [{ id: 'remy', email: 'remy@a2r.test' }]);
+    const r = await envoyer([subDe('remy')], payloadHumain);
+    expect(r.sent).toBe(1);
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+  });
+
+  it('🔴 rappel d’entretien, rapport prêt et avis système sont des notifications AUTOMATIQUES : retenus', async () => {
+    for (const template of ['maintenance_due', 'report_ready', 'system_notice']) {
+      const { envoyer } = monter(ADMIN, [{ id: 'remy', email: 'remy@a2r.test' }]);
+      expect((await envoyer([subDe('remy')], { title: 't', body: 'b', template })).sent).toBe(0);
+    }
   });
 
   it('🔴 liste VIDE : comportement d’avant, tout le monde reçoit', async () => {

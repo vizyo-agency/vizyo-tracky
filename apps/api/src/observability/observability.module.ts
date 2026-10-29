@@ -19,6 +19,7 @@ import { ErrorLogger } from './error-logger.service';
 import { ErrorRateWatchdogService } from './error-rate-watchdog.service';
 import { LogCleanupService } from './log-cleanup.service';
 import { RecensementSuppressionsService } from './recensement-suppressions.service';
+import { SentinelleNotifsInterditesService } from './sentinelle-notifs-interdites.service';
 import { SentinellesCoherenceService } from './sentinelles-coherence.service';
 import { VpsAuditWikiController } from './vps-audit-wiki.controller';
 import { VpsAuditWikiService } from './vps-audit-wiki.service';
@@ -63,6 +64,9 @@ import { VpsAuditWikiService } from './vps-audit-wiki.service';
     RecensementSuppressionsService,
     // Lot V6 — les sentinelles de cohérence : elles LISENT le produit et écrivent au centre.
     SentinellesCoherenceService,
+    // 29/10 — lit push_logs / email_logs / sms_logs et crie si une notification AUTOMATIQUE atteint un
+    // compte hors `NOTIFS_ONLY_EMAILS` : l'interrupteur de sûreté ne dit pas, lui, s'il fuit.
+    SentinelleNotifsInterditesService,
     // Décision D1 (2026-09-13) — ce conteneur a-t-il été créé par deploy/vps/deploy.sh ? Un
     // contournement du script ne peut pas être empêché ; il ne peut plus passer inaperçu.
     DeploiementSentinelleService,
