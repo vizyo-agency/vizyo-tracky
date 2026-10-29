@@ -506,9 +506,10 @@ interface SuiviVue {
 
     /* ── La fenêtre d'attente de commande ───────────────────────────────────────────────────
        Elle BLOQUE (voile plein écran, y compris les autres boutons de la page) : c'est son but.
-       Sous le consentement (4000), au-dessus de la proposition 2FA (3800). */
+       Au-dessus de la barre de navigation mobile (7000). */
     .ec-suivi-voile {
-      position: fixed; inset: 0; z-index: 3900; display: flex; align-items: center; justify-content: center;
+      /* 7100 : au-dessus de la barre de navigation du bas (7000), sous les confirmations (9000). */
+      position: fixed; inset: 0; z-index: 7100; display: flex; align-items: center; justify-content: center;
       padding: 16px; background: color-mix(in srgb, var(--bg-primary) 62%, transparent);
       backdrop-filter: blur(3px); cursor: progress;
     }

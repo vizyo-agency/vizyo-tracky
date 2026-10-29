@@ -64,7 +64,8 @@ import { SecurityService } from '../../core/services/security.service';
     `
     /* Voile et carte : mêmes valeurs que .ec-suivi-voile / .ec-suivi (engine-control-button). */
     .an-voile {
-      position: fixed; inset: 0; z-index: 3700; display: flex; align-items: center; justify-content: center;
+      /* 7100 : AU-DESSUS de la barre de navigation du bas (7000) — à 3700 elle masquait le pied de la feuille mobile. */
+      position: fixed; inset: 0; z-index: 7100; display: flex; align-items: center; justify-content: center;
       padding: 16px; background: color-mix(in srgb, var(--bg-primary) 62%, transparent);
       backdrop-filter: blur(3px); font-family: inherit;
     }
