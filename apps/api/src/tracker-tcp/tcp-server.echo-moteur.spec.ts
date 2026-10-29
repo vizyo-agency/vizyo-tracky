@@ -341,3 +341,34 @@ describe('TcpServerService — écho moteur orphelin (06 et 07/10/2026)', () => 
     expect(c.positions.ingest).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * ══ LA CLASSE DE DÉFAUT, PAS SEULEMENT SON INSTANCE (29/10/2026) ═══════════════════════════════
+ *
+ * MH-971-TD : l'écho `jt` d'un boîtier sans GPS était classé `no_fix`, et seul le cas `position` le
+ * proposait aux guetteurs. Le correctif a couvert `no_fix` ; ce test verrouille la règle générale, pour
+ * que le PROCHAIN type de trame (un format de firmware, une trame tronquée) ne rouvre pas le trou :
+ * quelle que soit la façon dont le décodeur classe une trame portant `jt`/`kt`, elle est proposée aux
+ * guetteurs d'accusé. Ajouter ici toute nouvelle forme observée dans `wire_logs`.
+ */
+describe('TcpServerService — tout écho moteur est proposé aux guetteurs, quelle que soit la classe de la trame', () => {
+  const FORMES: ReadonlyArray<readonly [string, string]> = [
+    ['avec fix GPS (position)', TRAME_JT],
+    ['sans fix GPS (no_fix)', TRAME_JT_SANS_GPS],
+    ['trame tronquée (unknown)', `imei:${IMEI},jt,261029054507;`],
+    ['`kt` avec fix GPS', TRAME_KT],
+    ['`kt` sans fix GPS', TRAME_KT_SANS_GPS],
+  ];
+
+  it.each(FORMES)('🔴 %s : la trame est proposée au guetteur', async (_nom, trame) => {
+    const c = monter();
+    c.socket.recevoir(TRAME_LOGIN);
+    await laisserTraiter();
+    c.socket.recevoir(trame);
+    await laisserTraiter();
+
+    expect(c.ackWaiter.tryMatch).toHaveBeenCalledWith(IMEI, trame.slice(0, -1));
+    for (const timer of c.prive.pendingOffline.values()) clearTimeout(timer);
+    c.prive.pendingOffline.clear();
+  });
+});

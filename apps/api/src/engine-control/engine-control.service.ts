@@ -2689,6 +2689,18 @@ export class EngineControlService implements OnModuleDestroy {
         return waiting;
       }
 
+      // ══ DÉCISION DU 29/10/2026 — CE SECOURS RESTE, ET C'EST LE SEUL ENVOI DE COUPURE SANS DEMANDE ═══════
+      //
+      // Boîtier SANS connexion TCP au moment de l'ordre (garage souterrain, data coupée) : la coupure part
+      // par SMS. C'est la SEULE voie qui atteigne ce véhicule, et c'est ce qui rend l'antivol et la coupe du
+      // soir effectifs hors ligne. Mesuré sur 7 jours : 2 coupures du planning (FG-669-DQ le 23/10, FN-644-CL
+      // le 28/10), donc un coût négligeable. Le retirer aurait laissé non coupés, la nuit, précisément les
+      // véhicules garés sous terre.
+      //
+      // Les garde-fous sont ceux d'avant : validité de 15 min (`ENGINE_CUT_SMS_TTL_S`), annulation au
+      // relais dès qu'une remise en route suit (`annulerSmsCoupuresRecentes`), SIM injoignable → report (T62).
+      // À NE PAS confondre avec le secours d'une coupure partie en TCP sans écho : celui-là n'est JAMAIS
+      // automatique (cf. `synchroniserBoitier`, à la demande de l'utilisateur).
       const attempt = await this.beginAttempt(command, 'SMS', 'QUEUED');
       const smsAttemptNumber = Number(
         (command as EngineControlCommand & { smsAttemptCount?: number }).smsAttemptCount ?? 0,
