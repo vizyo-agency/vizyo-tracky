@@ -20,6 +20,7 @@ import { PermissionsResolverService } from '../permissions/permissions-resolver.
 import { PrismaService } from '../prisma/prisma.service';
 import { VehicleAccessService } from '../vehicle-access/vehicle-access.service';
 import { RequestEngineCommandDto } from './dto/request-engine-command.dto';
+import { SyncEngineDto } from './dto/sync-engine.dto';
 import { EngineControlService } from './engine-control.service';
 
 @Controller('engine-control')
@@ -82,6 +83,33 @@ export class EngineControlController {
       role: req.user.role,
       fleetId: req.user.fleetId,
     }, 'MANUAL', dto.disableSchedule, false, dto.idempotencyKey);
+  }
+
+  /**
+   * Synchronisation MANUELLE d'un boîtier dont la coupure n'a pas été confirmée (véhicule en souterrain,
+   * zone sans GPS) — proposée à l'utilisateur qui insiste, jamais automatique : voir
+   * `EngineControlService.synchroniserBoitier`. Mêmes rôles et même permission que l'envoi d'une
+   * commande : qui peut couper peut demander la synchronisation de ce boîtier.
+   */
+  @Post('trackers/:trackerId/sync')
+  @Roles(
+    UserRole.FLEET_ADMIN,
+    UserRole.SUPER_ADMIN,
+    UserRole.FLEET_MANAGER,
+    UserRole.VIEWER,
+    UserRole.NIGHT_WATCHMAN,
+  )
+  @RequireVehiclePermission('engine_control', { paramName: 'trackerId' })
+  synchroniser(
+    @Param('trackerId') trackerId: string,
+    @Req() req: AuthenticatedRequest,
+    @Body() dto?: SyncEngineDto,
+  ) {
+    return this.engineControl.synchroniserBoitier(
+      trackerId,
+      { userId: req.user.id, role: req.user.role, fleetId: req.user.fleetId },
+      dto?.commandId,
+    );
   }
 
   @Get('commands')

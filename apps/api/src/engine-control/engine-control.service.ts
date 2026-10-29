@@ -162,6 +162,18 @@ const ECHO_MOTEUR_FENETRE_MS = 24 * 60 * 60 * 1000;
  * d'un ordre plus ancien.
  */
 const ECHO_MOTEUR_TOLERANCE_HORLOGE_MS = 15_000;
+/**
+ * 29/10/2026 — « Resume engine Succeed » reçu SANS remise en route demandée à l'application : on ne
+ * le rapproche d'une coupure que si celle-ci le précède d'au moins ce délai (cf.
+ * `constaterRemiseEnRouteParSms`). Plus proche, la réponse peut appartenir à un ordre antérieur.
+ */
+const SMS_REMISE_EN_ROUTE_DELAI_MIN_MS = 10_000;
+/**
+ * Validité du SMS de SYNCHRONISATION d'une coupure : 2 min, pas 15. Il double un ordre TCP déjà parti ; son seul
+ * rôle est d'arriver vite. Un téléphone endormi qui l'émettrait un quart d'heure plus tard re-couperait un
+ * véhicule rallumé entre-temps (relecture du 29/10). Env `ENGINE_CUT_SMS_RESCUE_TTL_S`, plancher 60 s.
+ */
+const ENGINE_CUT_SMS_RESCUE_TTL_S = Math.max(60, Number(process.env['ENGINE_CUT_SMS_RESCUE_TTL_S']) || 120);
 /** Motif posé sur une CUT supplantée (cf. `requestCommand`) — préfixe aussi la variante « SMS annulé ». */
 const CUT_SUPPLANTEE_PAR_RESTORE = 'CUT supplantée par une intention RESTORE plus récente';
 const ENGINE_RESTORE_SMS_EXHAUSTED_ALERT =
@@ -589,7 +601,7 @@ export class EngineControlService implements OnModuleDestroy {
 
       const trackers = await this.prisma.tracker.findMany({
         where: { simPhoneNumber: { endsWith: cle } },
-        select: { id: true, imei: true, vehicle: { select: { fleetId: true } } },
+        select: { id: true, imei: true, vehicle: { select: { id: true, fleetId: true } } },
         take: 2,
       });
       // Ambiguite = abstention : cf. `resoudreImeiParSim`. Confirmer une coupure moteur sur
@@ -597,23 +609,71 @@ export class EngineControlService implements OnModuleDestroy {
       if (trackers.length !== 1) return;
       const tracker = trackers[0];
 
-      const commande = await this.prisma.engineControlCommand.findFirst({
-        where: { trackerId: tracker.id, action: attendu.action, status: CommandStatus.SENT },
+      // 29/10/2026 — « envoyée » (SENT) OU échue sans preuve (SENT_UNCONFIRMED) : l'accusé du boîtier
+      // EST la preuve que « nul ne sait » attendait. Jamais une intention SUPPLANTÉE par la demande
+      // contraire : l'ordre le plus récent a gagné, la réponse d'un SMS plus ancien ne dit rien de
+      // l'état actuel. (`NOT … startsWith` écarterait aussi les `lastError` NULL : d'où trois branches.)
+      const accusable: Prisma.EngineControlCommandWhereInput = {
+        OR: [
+          { status: CommandStatus.SENT },
+          { status: CommandStatus.SENT_UNCONFIRMED, lastError: null },
+          {
+            status: CommandStatus.SENT_UNCONFIRMED,
+            NOT: [
+              { lastError: { startsWith: CUT_SUPPLANTEE_PAR_RESTORE } },
+              { lastError: { startsWith: RESTORE_SUPPLANTEE_PAR_CUT } },
+            ],
+          },
+        ],
+      };
+      let commande = await this.prisma.engineControlCommand.findFirst({
+        where: {
+          trackerId: tracker.id,
+          action: attendu.action,
+          source: { not: 'DEVICE_OBSERVED' },
+          createdAt: { gte: new Date(Date.now() - ECHO_MOTEUR_FENETRE_MS) },
+          ...accusable,
+        },
         orderBy: { createdAt: 'desc' },
-        select: { id: true, createdAt: true },
+        select: { id: true, createdAt: true, status: true },
       });
+      // Une commande « envoyée » EST la courante : toute demande contraire postérieure l'aurait
+      // supplantée. Une commande ÉCHUE, elle, peut dater d'hier sans qu'aucune marque ne le dise
+      // (relecture du 29/10 : une RESTORE d'hier échue avait avalé le « Resume » de ce matin et
+      // court-circuité la remise en route constatée). Elle n'est acquittable que si aucune demande
+      // CONTRAIRE ne l'a suivie.
+      if (commande?.status === CommandStatus.SENT_UNCONFIRMED) {
+        const contraire = await this.prisma.engineControlCommand.findFirst({
+          where: {
+            trackerId: tracker.id,
+            action: attendu.action === EngineAction.CUT ? EngineAction.RESTORE : EngineAction.CUT,
+            source: { not: 'DEVICE_OBSERVED' },
+            status: { notIn: [CommandStatus.REJECTED_SPEED, CommandStatus.FAILED] },
+            createdAt: { gt: commande.createdAt },
+          },
+          select: { id: true },
+        });
+        if (contraire) commande = null;
+      }
       if (!commande) {
         this.logger.debug(
           { imei: tracker.imei, action: attendu.action },
           'Accuse SMS moteur recu, mais aucune commande en attente pour ce boitier',
         );
+        // 29/10/2026 — un « Resume engine Succeed » SANS remise en route demandée à l'application :
+        // quelqu'un a rallumé le véhicule par SMS à la main. L'état de Tracky doit le suivre.
+        if (attendu.action === EngineAction.RESTORE) {
+          await this.constaterRemiseEnRouteParSms(tracker, evt);
+        } else {
+          await this.signalerCoupureApresRemiseEnRoute(tracker, evt);
+        }
         return;
       }
 
       // `updateMany` avec le statut dans le `where` : un second SMS identique ne reecrit pas
       // un acquittement deja pose. Le chemin est rejouable sans effet de bord.
       const { count } = await this.prisma.engineControlCommand.updateMany({
-        where: { id: commande.id, status: CommandStatus.SENT },
+        where: { id: commande.id, ackedAt: null, ...accusable },
         data: {
           status: CommandStatus.ACKNOWLEDGED,
           ackedAt: new Date(),
@@ -642,6 +702,417 @@ export class EngineControlService implements OnModuleDestroy {
         'Echec du rapprochement d\'un accuse SMS moteur',
       );
     }
+  }
+
+  /**
+   * Un « Stop engine Succeed » que plus aucune coupure en attente n'explique, alors que la dernière demande
+   * de l'application est une REMISE EN ROUTE : un message de coupure en retard (synchronisation déjà prise
+   * par le téléphone quand la remise en route a été demandée) vient de RE-COUPER le véhicule. L'écran dit
+   * « rallumé » : c'est exactement l'appel de nuit à éviter — on l'écrit au centre d'alerte, en CRITICAL.
+   * Ne lève jamais.
+   */
+  private async signalerCoupureApresRemiseEnRoute(
+    tracker: { id: string; imei: string; vehicle: { id: string; fleetId: string } | null },
+    evt: SmsInboundEvent,
+  ): Promise<void> {
+    try {
+      const recu = new Date(evt.receivedAt);
+      const recuMs = Number.isNaN(recu.getTime()) ? Date.now() : recu.getTime();
+      const derniere = await this.prisma.engineControlCommand.findFirst({
+        where: {
+          trackerId: tracker.id,
+          source: { not: 'DEVICE_OBSERVED' },
+          status: { notIn: [CommandStatus.REJECTED_SPEED, CommandStatus.FAILED] },
+          createdAt: { gte: new Date(recuMs - ENGINE_CUT_SMS_TTL_S * 1000), lte: new Date(recuMs) },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!derniere || derniere.action !== EngineAction.RESTORE) return;
+      this.errorLogger
+        .record(
+          `Le boîtier ${tracker.vehicle ? 'de ce véhicule' : tracker.imei} a répondu « Stop engine Succeed » alors que la dernière demande est une remise en route : ` +
+            'le véhicule a probablement été RE-COUPÉ par un message en retard — vérifier le véhicule et le rallumer si besoin',
+          'engine-control',
+          {
+            imei: tracker.imei,
+            trackerId: tracker.id,
+            commandId: derniere.id,
+            fleetId: tracker.vehicle?.fleetId ?? undefined,
+          },
+          'CRITICAL',
+        )
+        .catch(() => undefined);
+    } catch (err) {
+      this.logger.error(
+        { imei: tracker.imei, error: err instanceof Error ? err.message : String(err) },
+        'Echec du signalement d’une coupure arrivée après une remise en route',
+      );
+    }
+  }
+
+  /**
+   * ══ « RESUME ENGINE SUCCEED » SANS REMISE EN ROUTE DEMANDÉE À L'APPLICATION (29/10/2026) ═════
+   *
+   * Un véhicule de CDEF31 (MH-971-TD) est resté coupé à l'arrivée du veilleur. Tracky n'ayant pas
+   * pu le rallumer — l'écran lui montrait « Couper » — le propriétaire a envoyé `resume<mot de
+   * passe>` PAR SMS, à la main. Le boîtier a répondu « Resume engine Succeed » à 06:48:27 : reçu,
+   * écrit dans `sms_logs`, et sans effet. L'application ne connaissait aucune RESTORE à acquitter,
+   * donc la dernière intention restait « coupure » : la coupure du matin, toujours affichée alors
+   * que le véhicule roulait déjà.
+   *
+   * Cette réponse est une PREUVE, pas une heuristique d'ignition (celles-là, on les a retirées :
+   * un contact coupé est presque toujours un stationnement). Le boîtier dit lui-même qu'il vient
+   * de rétablir. Si la dernière intention de l'application pour ce boîtier est une coupure, plus
+   * ancienne que la réponse, on enregistre la remise en route — acquittée, avec son motif — et on
+   * clôt les coupures encore ouvertes, comme le ferait une RESTORE demandée depuis l'écran.
+   *
+   * Garde-fous (relecture contradictoire du 29/10, qui a trouvé les trois derniers) :
+   *  - dernière intention = COUPURE seulement (sinon il n'y a rien à corriger, et la réponse d'un
+   *    `resume` sur un véhicule déjà libre n'invente aucune ligne) ;
+   *  - la coupure doit précéder la réponse d'au moins 10 s ;
+   *  - 🔴 ABSTENTION si une remise en route de Tracky est partie par SMS et n'a pas été acquittée :
+   *    la réponse est probablement la sienne (un SMS met des minutes, parfois des heures, à arriver).
+   *    L'écran reste alors sur « coupé » — le côté sûr, jamais l'inverse ;
+   *  - un même SMS (`smsLogId`) ne produit qu'une ligne (webhook rejoué) ;
+   *  - la ligne est DATÉE de la réception du SMS, pas du traitement : une coupure demandée entre-temps
+   *    reste plus récente qu'elle, et l'écran dit « coupé » ;
+   *  - 🔴 le constat NE TOUCHE PAS AU RESTE : ni SMS de coupure annulé, ni planning relâché. Le critère
+   *    est un numéro d'expéditeur, donc un SMS usurpé « Resume engine Succeed » ne doit pas pouvoir
+   *    défaire une immobilisation antivol. Le gel veilleur reste posé jusqu'à un « Réactiver » humain ;
+   *  - le constat est écrit au centre d'alerte : un humain doit savoir qu'un rallumage a eu lieu hors
+   *    de l'application.
+   * Aucun ordre n'est émis vers le boîtier : c'est un ÉTAT constaté.
+   *
+   * Ne lève jamais (appelée depuis un écouteur d'événement).
+   */
+  private async constaterRemiseEnRouteParSms(
+    tracker: { id: string; imei: string; vehicle: { id: string; fleetId: string } | null },
+    evt: SmsInboundEvent,
+  ): Promise<void> {
+    try {
+      const recu = new Date(evt.receivedAt);
+      const recuMs = Number.isNaN(recu.getTime()) ? Date.now() : recu.getTime();
+      const derniere = await this.prisma.engineControlCommand.findFirst({
+        where: {
+          trackerId: tracker.id,
+          source: { not: 'DEVICE_OBSERVED' },
+          status: { notIn: [CommandStatus.REJECTED_SPEED, CommandStatus.FAILED] },
+          createdAt: { gte: new Date(recuMs - ECHO_MOTEUR_FENETRE_MS) },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!derniere || derniere.action !== EngineAction.CUT) return;
+      if (derniere.createdAt.getTime() > recuMs - SMS_REMISE_EN_ROUTE_DELAI_MIN_MS) {
+        this.logger.warn(
+          { imei: tracker.imei, commandId: derniere.id, creeA: derniere.createdAt.toISOString() },
+          'Réponse « Resume » reçue juste après une coupure : trop proche pour lui répondre, ignorée',
+        );
+        return;
+      }
+
+      // Déjà constaté pour CE SMS (webhook rejoué) : rien à refaire.
+      const dejaConstate = await this.prisma.engineControlCommand.findFirst({
+        where: { trackerId: tracker.id, action: EngineAction.RESTORE, smsLogId: evt.smsLogId },
+        select: { id: true },
+      });
+      if (dejaConstate) return;
+      // Une remise en route de Tracky partie par SMS et pas encore acquittée : la réponse est
+      // vraisemblablement la sienne, et rien ne prouve que ce soit un rallumage manuel.
+      const enVol = await this.prisma.engineControlCommand.findFirst({
+        where: {
+          trackerId: tracker.id,
+          action: EngineAction.RESTORE,
+          source: { not: 'DEVICE_OBSERVED' },
+          smsAttemptCount: { gt: 0 },
+          status: { in: [CommandStatus.SENT, CommandStatus.SENT_UNCONFIRMED] },
+          createdAt: { gte: new Date(recuMs - ENGINE_RESTORE_EXPIRY_MS) },
+        },
+        select: { id: true },
+      });
+      if (enVol) {
+        this.logger.warn(
+          { imei: tracker.imei, commandId: enVol.id },
+          'Réponse « Resume » reçue alors qu’une remise en route de Tracky est partie par SMS sans accusé : probablement la sienne, rien n’est constaté',
+        );
+        return;
+      }
+
+      const systeme = await this.prisma.user
+        .findFirst({ where: { email: 'system@tracky.local' }, select: { id: true } })
+        .catch(() => null);
+      const maintenant = new Date();
+      // Les coupures ouvertes sont closes comme le ferait une RESTORE demandée à l'écran — mais
+      // seulement celles qui PRÉCÈDENT la dernière lue : une coupure créée pendant ce traitement reste.
+      const ouvertes = await this.prisma.engineControlCommand.findMany({
+        where: {
+          trackerId: tracker.id,
+          action: EngineAction.CUT,
+          status: { in: [CommandStatus.PENDING, CommandStatus.SENT] },
+          activeKey: { not: null },
+          createdAt: { lte: derniere.createdAt },
+        },
+        select: { id: true },
+      });
+      if (ouvertes.length > 0) {
+        await this.prisma.engineControlCommand.updateMany({
+          where: { id: { in: ouvertes.map((c) => c.id) }, status: { in: [CommandStatus.PENDING, CommandStatus.SENT] } },
+          data: {
+            status: CommandStatus.SENT_UNCONFIRMED,
+            activeKey: null,
+            nextAttemptAt: null,
+            dispatchLeaseUntil: null,
+            expiredAt: maintenant,
+            lastError: CUT_SUPPLANTEE_PAR_RESTORE,
+          },
+        });
+      }
+
+      const restore = await this.prisma.engineControlCommand.create({
+        data: {
+          trackerId: tracker.id,
+          action: EngineAction.RESTORE,
+          // Datée de la RÉCEPTION du SMS : toute coupure demandée depuis reste plus récente.
+          createdAt: new Date(recuMs),
+          reason:
+            'Remise en route constatée : le boîtier a répondu « Resume engine Succeed » par SMS ' +
+            '(commande envoyée hors de Tracky). Aucun ordre n’a été émis par l’application.',
+          requestedBy: systeme?.id ?? derniere.requestedBy,
+          source: 'MANUAL',
+          status: CommandStatus.ACKNOWLEDGED,
+          channel: 'SMS',
+          smsLogId: evt.smsLogId,
+          sentAt: new Date(recuMs),
+          ackedAt: maintenant,
+          confirmationExpected: false,
+          activeKey: null,
+        },
+      });
+
+      // Un humain doit savoir qu'un véhicule a été rallumé HORS de l'application — et que son
+      // planning, lui, n'a pas bougé (gel veilleur éventuel : « Réactiver » en journée).
+      this.errorLogger
+        .record(
+          `Remise en route constatée par SMS du boîtier de ${tracker.vehicle ? 'ce véhicule' : tracker.imei} ` +
+            '(commande envoyée hors de Tracky) : l’état de l’application a été corrigé, le planning n’a pas été modifié',
+          'engine-control',
+          {
+            imei: tracker.imei,
+            trackerId: tracker.id,
+            commandId: restore.id,
+            coupureId: derniere.id,
+            fleetId: tracker.vehicle?.fleetId ?? undefined,
+          },
+          NIVEAU_DEGRADATION,
+        )
+        .catch(() => undefined);
+
+      this.logger.warn(
+        { commandId: restore.id, imei: tracker.imei, coupureId: derniere.id, statutCoupure: derniere.status },
+        'Remise en route constatée par SMS du boîtier (envoyée hors de Tracky) : état de l’application corrigé',
+      );
+      if (tracker.vehicle?.fleetId) this.emitUpdate(restore, tracker.vehicle.fleetId);
+    } catch (err) {
+      this.logger.error(
+        { imei: tracker.imei, error: err instanceof Error ? err.message : String(err) },
+        'Echec de l’enregistrement d’une remise en route constatée par SMS',
+      );
+    }
+  }
+
+  /**
+   * ══ SYNCHRONISATION MANUELLE D'UN BOÎTIER, À LA DEMANDE DE L'UTILISATEUR (29/10/2026) ═══════
+   *
+   * Un véhicule sans GPS (souterrain, zone non couverte) peut exécuter un ordre sans que l'application
+   * en reçoive la preuve : la coupure reste « envoyée », puis « non confirmée », et l'écran ne dit plus
+   * ce que fait le boîtier. L'utilisateur qui insiste se voit proposer une SYNCHRONISATION : le même
+   * ordre repart par un canal de secours, et la réponse du boîtier (« Stop engine Succeed ») remet
+   * l'écran d'accord avec le véhicule (`onAccuseSmsMoteur`).
+   *
+   * Ce n'est PAS automatique, et c'est voulu (décision du propriétaire, 29/10) : un SMS coûte, et ce
+   * secours ne se justifie que pour un véhicule sur lequel quelqu'un insiste. Il ne sert qu'à une
+   * COUPURE ; une remise en route a déjà son propre secours, sans condition.
+   *
+   * Gardes — une coupure en retard est le pire cas (véhicule immobilisé que personne n'a demandé) :
+   *  - la dernière intention du boîtier est une COUPURE ouverte (SENT, ou échue sans preuve) de moins de
+   *    24 h, sans demande contraire plus récente ni coupure supplantée ;
+   *  - une seule synchronisation par coupure : la réponse met jusqu'à une minute, on ne la double pas ;
+   *  - le SMS a une validité de 2 min (`ENGINE_CUT_SMS_RESCUE_TTL_S`), et toute remise en route demandée
+   *    ensuite le rappelle au relais (`annulerSmsCoupuresRecentes`) ;
+   *  - l'écriture est conditionnelle : un accusé arrivé pendant l'envoi gagne, et le SMS devenu inutile
+   *    est annulé au relais.
+   * Le tenant est filtré comme pour toute commande (un autre client ne peut pas viser ce boîtier).
+   * Les messages d'erreur parlent de « synchronisation » : l'écran ne nomme jamais le canal.
+   */
+  async synchroniserBoitier(
+    trackerId: string,
+    requestedBy: RequestedBy,
+    commandId?: string,
+  ): Promise<EngineControlCommand> {
+    const trackerWhere: Prisma.TrackerWhereInput = { id: trackerId };
+    if (requestedBy.role !== UserRole.SUPER_ADMIN) {
+      if (!requestedBy.fleetId) throw new NotFoundException('Tracker introuvable');
+      trackerWhere.vehicle = { fleetId: requestedBy.fleetId };
+    }
+    const tracker = await this.prisma.tracker.findFirst({
+      where: trackerWhere,
+      include: { vehicle: { include: { fleet: true } } },
+    });
+    if (!tracker) throw new NotFoundException('Tracker introuvable');
+    if (!tracker.vehicle) throw new BadRequestException('Tracker non associé à un véhicule');
+    const fleetId = tracker.vehicle.fleetId;
+
+    const cmd = await this.prisma.engineControlCommand.findFirst({
+      where: {
+        trackerId,
+        source: { not: 'DEVICE_OBSERVED' },
+        status: { notIn: [CommandStatus.REJECTED_SPEED, CommandStatus.FAILED] },
+        createdAt: { gte: new Date(Date.now() - ECHO_MOTEUR_FENETRE_MS) },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!cmd || cmd.action !== EngineAction.CUT) {
+      throw new ConflictException('Aucune synchronisation nécessaire : le dernier ordre n’est pas une coupure.');
+    }
+    // L'écran désigne la coupure qu'il a montrée à l'utilisateur : si une autre l'a remplacée depuis, on ne
+    // synchronise pas ce que personne n'a vu (relecture du 29/10).
+    if (commandId && commandId !== cmd.id) {
+      throw new ConflictException('La situation de ce véhicule a changé depuis : actualisez l’écran avant de synchroniser.');
+    }
+    if (cmd.ackedAt || cmd.status === CommandStatus.ACKNOWLEDGED) {
+      throw new ConflictException('Le boîtier a déjà confirmé cet ordre : rien à synchroniser.');
+    }
+    if (cmd.status === CommandStatus.PENDING) {
+      throw new ConflictException('L’ordre est encore en cours d’envoi : patientez quelques secondes.');
+    }
+    if (
+      cmd.status !== CommandStatus.SENT &&
+      !(cmd.status === CommandStatus.SENT_UNCONFIRMED && !cmd.lastError?.startsWith(CUT_SUPPLANTEE_PAR_RESTORE))
+    ) {
+      throw new ConflictException('Cet ordre n’est plus en attente : rien à synchroniser.');
+    }
+    if (cmd.smsAttemptCount > 0 || cmd.channel === 'SMS') {
+      throw new ConflictException(
+        'Une synchronisation est déjà en cours pour cet ordre : la réponse du boîtier peut prendre jusqu’à une minute.',
+      );
+    }
+    // 🔴 Le véhicule a-t-il BOUGÉ depuis l'ordre ? Alors la coupure n'a pas été exécutée (ou le véhicule a été
+    // rallumé hors de l'application) : renvoyer `stop` immobiliserait un véhicule en service. Un véhicule en
+    // souterrain n'émet aucune position après l'ordre : il reste servi.
+    const aBouge = await this.prisma.position.findFirst({
+      where: { trackerId, timestamp: { gt: cmd.createdAt }, speedKmh: { gt: REST_SPEED_KMH } },
+      select: { id: true },
+    });
+    if (aBouge) {
+      throw new ConflictException(
+        'Le véhicule a bougé depuis cet ordre : une synchronisation n’a plus de sens. Vérifiez le véhicule sur place.',
+      );
+    }
+
+    // 🔴 RÉSERVATION ATOMIQUE avant tout envoi : deux onglets ou deux utilisateurs qui cliquent dans la même
+    // seconde ne doivent pas coûter deux messages. Seul celui qui passe de 0 à 1 envoie ; les autres reçoivent 409.
+    const reserve = await this.prisma.engineControlCommand.updateMany({
+      where: {
+        id: cmd.id,
+        ackedAt: null,
+        smsAttemptCount: 0,
+        // `NOT channel = 'SMS'` écarterait aussi les canaux NULL (SQL : NOT(NULL) est NULL) : d'où le OR explicite.
+        AND: [
+          { OR: [{ channel: null }, { channel: { not: 'SMS' } }] },
+          {
+            OR: [
+              { status: CommandStatus.SENT },
+              { status: CommandStatus.SENT_UNCONFIRMED, lastError: null },
+              {
+                status: CommandStatus.SENT_UNCONFIRMED,
+                NOT: [
+                  { lastError: { startsWith: CUT_SUPPLANTEE_PAR_RESTORE } },
+                  { lastError: { startsWith: RESTORE_SUPPLANTEE_PAR_CUT } },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      data: { smsAttemptCount: 1 },
+    });
+    if (reserve.count !== 1) {
+      throw new ConflictException(
+        'Une synchronisation est déjà en cours pour cet ordre, ou l’ordre a changé : actualisez l’écran.',
+      );
+    }
+
+    const attempt = await this.beginAttempt(cmd, 'SMS', 'QUEUED');
+    const result = await this.trySmsFallback(tracker.imei, EngineAction.CUT, cmd.id, 'MANUAL', ENGINE_CUT_SMS_RESCUE_TTL_S);
+    if (!result.ok) {
+      // Rien n'est parti : la réservation est rendue, l'utilisateur pourra réessayer.
+      await this.prisma.engineControlCommand
+        .updateMany({
+          where: { id: cmd.id, smsAttemptCount: 1, OR: [{ channel: null }, { channel: { not: 'SMS' } }] },
+          data: { smsAttemptCount: 0 },
+        })
+        .catch(() => undefined);
+      await this.finishAttempt(attempt.id, 'FAILED', { errorMessage: result.reason });
+      this.logger.warn({ commandId: cmd.id, imei: tracker.imei, reason: result.reason }, 'Synchronisation du boîtier impossible');
+      throw new ServiceUnavailableException(
+        'Synchronisation impossible pour le moment : aucun canal de secours n’est disponible pour ce boîtier. Vérifiez le véhicule sur place.',
+      );
+    }
+    await this.finishAttempt(attempt.id, result.outcome === 'delivered' ? 'DELIVERED' : 'ACCEPTED', {
+      providerId: result.providerId,
+      smsLogId: result.smsLogId,
+      rawCode: result.submittedStatus,
+    });
+
+    // Écriture conditionnelle : une commande acquittée ou supplantée entre-temps n'est pas réécrite, et le
+    // message devenu inutile est rappelé au relais (best-effort).
+    const { count } = await this.prisma.engineControlCommand.updateMany({
+      where: { id: cmd.id, ackedAt: null, status: { in: [CommandStatus.SENT, CommandStatus.SENT_UNCONFIRMED] } },
+      data: {
+        channel: 'SMS',
+        smsLogId: result.smsLogId ?? null,
+        attemptCount: attempt.number,
+        smsAttemptCount: 1,
+        lastAttemptAt: new Date(),
+      },
+    });
+    // 🔴 Course avec une remise en route : l'envoi prend quelques secondes, pendant lesquelles une RESTORE a pu
+    // supplanter cette coupure SANS trouver de message à rappeler (son `smsLogId` n'était pas encore écrit).
+    // On relit donc APRÈS l'écriture : coupure remplacée, ou demande plus récente — le message est rappelé.
+    const relue = await this.prisma.engineControlCommand.findUnique({ where: { id: cmd.id } });
+    const plusRecente = await this.prisma.engineControlCommand.findFirst({
+      where: {
+        trackerId,
+        createdAt: { gt: cmd.createdAt },
+        source: { not: 'DEVICE_OBSERVED' },
+        status: { notIn: [CommandStatus.REJECTED_SPEED, CommandStatus.FAILED] },
+      },
+      select: { id: true },
+    });
+    const remplacee =
+      !!relue?.lastError?.startsWith(CUT_SUPPLANTEE_PAR_RESTORE) || !!relue?.lastError?.startsWith(RESTORE_SUPPLANTEE_PAR_CUT) || !!plusRecente;
+    if ((count !== 1 || remplacee) && result.smsLogId) {
+      void this.sms.cancelOutbound(result.smsLogId).catch(() => undefined);
+    }
+    this.systemActivity.record({
+      category: 'ENGINE',
+      action: 'engine_sync',
+      status: count === 1 ? 'SUCCESS' : 'SKIPPED',
+      actor: 'utilisateur',
+      target: tracker.vehicle.plate ?? tracker.vehicle.id,
+      detail: 'Synchronisation manuelle du boîtier (état de la coupure non confirmé)',
+      fleetId,
+      triggeredByUserId: requestedBy.userId,
+    });
+    this.logger.log(
+      { commandId: cmd.id, imei: tracker.imei, userId: requestedBy.userId, written: count === 1 },
+      'Synchronisation manuelle du boîtier lancée — en attente de sa réponse',
+    );
+    const row = relue ?? cmd;
+    this.emitUpdate(row, fleetId);
+    if (remplacee) {
+      throw new ConflictException('Une demande plus récente a pris le relais de cet ordre : la synchronisation a été annulée.');
+    }
+    return row;
   }
 
   /**
@@ -1360,6 +1831,15 @@ export class EngineControlService implements OnModuleDestroy {
         if (!cut.smsLogId) continue;
         void this.cancelSupersededCutSms(cut.id, cut.smsLogId, tracker.imei);
       }
+      // 29/10/2026 (relecture) — les coupures DÉJÀ acquittées (ou échues) gardent parfois leur SMS dans
+      // la file du relais ou d'un téléphone endormi : un écho TCP tardif les acquitte, le SMS de
+      // secours reste. Sans cette annulation, il s'exécuterait APRÈS ce rallumage et re-couperait le
+      // véhicule. Quel que soit leur statut, les SMS de coupure encore valides sont donc rappelés.
+      void this.annulerSmsCoupuresRecentes(
+        trackerId,
+        tracker.imei,
+        supplantees.map((c) => c.id),
+      ).catch(() => undefined);
     }
     let command: EngineControlCommand;
     try {
@@ -1582,6 +2062,28 @@ export class EngineControlService implements OnModuleDestroy {
    * Ne lève jamais : un refus (message déjà pris par le téléphone, relais ancien) est journalisé
    * et laisse la commande en `SENT_UNCONFIRMED` — l'état qui dit honnêtement « nul ne sait ».
    */
+  /**
+   * Rappelle au relais TOUS les SMS de coupure encore valides pour ce boîtier, quel que soit le statut de
+   * leur commande (relecture du 29/10) : une coupure acquittée par un écho TCP tardif garde son SMS de
+   * secours dans la file d'un téléphone endormi, et l'émettrait après le rallumage. `supplantees` : les
+   * lignes déjà traitées par la supplantation, pour ne pas rappeler deux fois le même SMS.
+   */
+  private async annulerSmsCoupuresRecentes(trackerId: string, imei: string, dejaTraitees: string[]): Promise<void> {
+    const coupures = await this.prisma.engineControlCommand.findMany({
+      where: {
+        trackerId,
+        action: EngineAction.CUT,
+        smsLogId: { not: null },
+        lastAttemptAt: { gte: new Date(Date.now() - ENGINE_CUT_SMS_TTL_S * 1000) },
+        ...(dejaTraitees.length > 0 ? { id: { notIn: dejaTraitees } } : {}),
+      },
+      select: { id: true, smsLogId: true },
+    });
+    for (const cut of coupures) {
+      if (cut.smsLogId) void this.cancelSupersededCutSms(cut.id, cut.smsLogId, imei);
+    }
+  }
+
   private async cancelSupersededCutSms(
     commandId: string,
     smsLogId: string,
@@ -2423,6 +2925,10 @@ export class EngineControlService implements OnModuleDestroy {
           { commandId: command.id, attemptId: attempt.id, imei },
           'CUT livrée sur TCP sans ACK applicatif — attente de la preuve ignition',
         );
+        // 29/10/2026 — AUCUN secours SMS automatique pour une coupure : un SMS coûte, et sur 30 véhicules
+        // par soir le coût n'a pas de sens. Le cas d'un boîtier qui n'accuse pas (souterrain, zone sans
+        // GPS) est traité à la DEMANDE de l'utilisateur : « Synchroniser le boîtier »
+        // (`synchroniserBoitier`), proposé quand l'écran n'a reçu aucune preuve.
       });
 
     // Sprint 2 (Obj 5) — sentinelle d'observabilité : une coupure CONFIRMABLE qui
@@ -3195,6 +3701,7 @@ export class EngineControlService implements OnModuleDestroy {
     action: EngineAction,
     commandId: string,
     source?: 'MANUAL' | 'SCHEDULER',
+    cutTtlSeconds: number = ENGINE_CUT_SMS_TTL_S,
   ): Promise<
     | {
         ok: true;
@@ -3250,7 +3757,7 @@ export class EngineControlService implements OnModuleDestroy {
       // T41 — une COUPURE périme (le téléphone n'émet plus un `stop` en retard) ; une remise en
       // route ne périme jamais et passe devant tout le reste sur le téléphone.
       ...(action === EngineAction.CUT
-        ? { ttlSeconds: ENGINE_CUT_SMS_TTL_S }
+        ? { ttlSeconds: cutTtlSeconds }
         : { smsPriority: ENGINE_RESTORE_SMS_PRIORITY }),
       template: 'engine_control_fallback', source: 'engine-control-fallback',
     });

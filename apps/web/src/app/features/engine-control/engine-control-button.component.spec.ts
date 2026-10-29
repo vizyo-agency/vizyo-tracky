@@ -278,7 +278,7 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
   const lienHistorique = (): HTMLAnchorElement | null => fixture.nativeElement.querySelector('a.ec-sortie');
 
   for (const role of ['NIGHT_WATCHMAN', 'FLEET_MANAGER']) {
-    it(`🔴 D1 — ${role}, coupe NON CONFIRMÉE : deux sorties, et aucun lien vers une page qui le refoule`, fakeAsync(() => {
+    it(`🔴 D1 — ${role}, coupe NON CONFIRMÉE : trois sorties (dont la synchronisation, 29/10), et aucun lien vers une page qui le refoule`, fakeAsync(() => {
       servirCoupeNonConfirmee();
       creer({ role });
       tick();
@@ -287,7 +287,7 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
       // Le bandeau est bien là — sinon l'absence du lien ne prouverait rien.
       expect(fixture.nativeElement.querySelector('.ec-nc')).withContext('bandeau « non confirmée » absent').not.toBeNull();
       expect(lienHistorique()).withContext('lien mort offert à ' + role).toBeNull();
-      expect(sorties()).toEqual(['Renvoyer la commande', "J'ai vérifié sur place"]);
+      expect(sorties()).toEqual(['Renvoyer la commande', 'Synchroniser le boîtier', "J'ai vérifié sur place"]);
     }));
   }
 
@@ -303,7 +303,7 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
     // ouvrirait l'agenda au moment où l'on cherche la trace d'une coupe.
     expect(lien?.getAttribute('href') ?? '').toContain('/fleet-admin/activity');
     expect(lien?.getAttribute('href') ?? '').toContain('tab=engine');
-    expect(sorties().length).toBe(3);
+    expect(sorties().length).toBe(4); // renvoyer, historique, synchroniser, « vérifié sur place »
   }));
 
   // ══ 06 et 07/10/2026 — LA COUPURE EXÉCUTÉE MAIS NON ACQUITTÉE ═══════════════════════════════

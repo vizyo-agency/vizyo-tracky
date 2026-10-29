@@ -41,6 +41,16 @@ export class EngineControlService {
     );
   }
 
+  /**
+   * Synchronisation MANUELLE d'un boîtier dont la coupure n'a pas été confirmée (souterrain, zone non
+   * couverte par le GPS). Jamais automatique : proposée à l'utilisateur qui insiste. Le canal de secours
+   * n'est jamais nommé à l'écran.
+   */
+  synchroniser(trackerId: string, commandId: string): Observable<EngineControlCommandDto> {
+    // `commandId` : la coupure que l'écran vient de présenter — le serveur refuse si une autre l'a remplacée.
+    return this.http.post<EngineControlCommandDto>(`/api/engine-control/trackers/${trackerId}/sync`, { commandId });
+  }
+
   listCommands(trackerId: string, limit = 5): Observable<EngineControlCommandDto[]> {
     return this.http.get<EngineControlCommandDto[]>(
       '/api/engine-control/commands',

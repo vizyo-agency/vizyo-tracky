@@ -198,6 +198,7 @@ describe('EngineControlService', () => {
     engineDeliveryAttempt: ReturnType<typeof faussesTentatives>;
     smsLog: { findMany: jest.Mock };
     vehicleSchedule: { updateMany: jest.Mock; findFirst: jest.Mock };
+    user: { findFirst: jest.Mock };
   };
   let registry: { get: jest.Mock; send: jest.Mock };
   let ackWaiter: { waitForAck: jest.Mock; cancelAll: jest.Mock };
@@ -226,6 +227,8 @@ describe('EngineControlService', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
         findFirst: jest.fn().mockResolvedValue(null),
       },
+      // Compte de service qui porte les remises en route constatées par SMS (cf. TRK-036, 29/10).
+      user: { findFirst: jest.fn().mockResolvedValue({ id: 'user-systeme' }) },
     };
 
     registry = {
@@ -1344,7 +1347,15 @@ describe('EngineControlService', () => {
       await service.onAccuseSmsMoteur(evt('Stop engine Succeed'));
 
       const where = prisma.engineControlCommand.findFirst.mock.calls[0][0].where;
-      expect(where).toMatchObject({ trackerId: 'trk-1', action: 'CUT', status: 'SENT' });
+      expect(where).toMatchObject({ trackerId: 'trk-1', action: 'CUT' });
+      // Depuis le 29/10 : « envoyée » OU échue sans preuve — l'accusé du boîtier est la preuve
+      // que « nul ne sait » attendait. Jamais une intention supplantée (cf. tests ci-dessous).
+      expect(where.OR).toEqual(
+        expect.arrayContaining([
+          { status: 'SENT' },
+          { status: 'SENT_UNCONFIRMED', lastError: null },
+        ]),
+      );
     });
 
     it('un SMS ordinaire ne touche à rien', async () => {
@@ -1407,6 +1418,570 @@ describe('EngineControlService', () => {
 
       const where = prisma.tracker.findMany.mock.calls[0][0].where;
       expect(where.simPhoneNumber.endsWith).toBe('030609501');
+    });
+  });
+
+  /**
+   * ══ MH-971-TD, 29/10/2026 — LE PROPRIÉTAIRE A RALLUMÉ PAR SMS, L'ÉCRAN DISAIT TOUJOURS « COUPÉ » ══
+   *
+   * Tracky n'a pas pu rallumer le véhicule (l'écran offrait « Couper » : voir `tcp-server.service`,
+   * écho `jt` d'un boîtier sans GPS). Le propriétaire a envoyé `resume<mot de passe>` à la main ; le
+   * boîtier a répondu « Resume engine Succeed » à 06:48:27 — reçu, écrit dans `sms_logs`, et sans
+   * effet : aucune RESTORE n'attendait cet accusé, la dernière intention restait une coupure.
+   */
+  describe('« Resume engine Succeed » sans remise en route demandée à l’application (29/10/2026)', () => {
+    const SIM = '+345901030609501';
+    const recu = () => new Date();
+    const evt = (body = 'Resume engine Succeed') =>
+      ({ smsLogId: 'log-971', fromNumber: SIM, toNumber: '+33656691615', body, receivedAt: recu().toISOString() }) as never;
+    const GEL = new Date('9999-12-31T23:59:59.000Z');
+
+    const armer = (derniere: Record<string, unknown> | null, ouvertes: Array<{ id: string; smsLogId: string | null }> = []) => {
+      prisma.tracker.findMany.mockResolvedValue([
+        { id: 'trk-1', imei: '860000000000971', vehicle: { id: 'veh-1', fleetId: 'fleet-1' } },
+      ] as never);
+      // findFirst, dans l'ordre : une commande accusable (aucune) ; la dernière intention du boîtier ;
+      // un SMS déjà constaté (aucun) ; une remise en route de Tracky partie par SMS sans accusé (aucune).
+      prisma.engineControlCommand.findFirst
+        .mockResolvedValueOnce(null as never)
+        .mockResolvedValueOnce(derniere as never)
+        .mockResolvedValueOnce(null as never)
+        .mockResolvedValueOnce(null as never);
+      prisma.engineControlCommand.findMany.mockResolvedValue(ouvertes as never);
+    };
+    const coupure = (over: Record<string, unknown> = {}) =>
+      createdCommand({
+        id: 'cmd-coupure',
+        action: EngineAction.CUT,
+        status: CommandStatus.SENT,
+        requestedBy: 'user-veilleur',
+        createdAt: new Date(Date.now() - 3 * 60_000),
+        ...over,
+      });
+
+    it('🔴 la dernière intention est une coupure : la remise en route est ENREGISTRÉE, acquittée, avec son motif', async () => {
+      // LE test du correctif : sur le code d'avant, ce SMS ne laissait aucune trace.
+      armer(coupure());
+
+      await service.onAccuseSmsMoteur(evt());
+
+      expect(prisma.engineControlCommand.create).toHaveBeenCalledTimes(1);
+      const data = prisma.engineControlCommand.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({
+        trackerId: 'trk-1',
+        action: 'RESTORE',
+        status: 'ACKNOWLEDGED',
+        channel: 'SMS',
+        source: 'MANUAL',
+        requestedBy: 'user-systeme',
+        smsLogId: 'log-971',
+        activeKey: null,
+      });
+      expect(data.reason).toContain('Resume engine Succeed');
+      expect(data.ackedAt).toBeInstanceOf(Date);
+      // L'écran la reçoit en temps réel : le bon bouton revient sans recharger.
+      expect(gateway.emitEngineCommandUpdate).toHaveBeenCalledWith(
+        'fleet-1',
+        expect.objectContaining({ action: 'RESTORE', status: 'ACKNOWLEDGED' }),
+      );
+    });
+
+    it('aucun ordre n’est émis vers le boîtier : c’est un état CONSTATÉ', async () => {
+      armer(coupure());
+      await service.onAccuseSmsMoteur(evt());
+      expect(registry.send).not.toHaveBeenCalled();
+    });
+
+    it('les coupures encore ouvertes sont closes (supplantées) — celles d’AVANT la dernière lue seulement', async () => {
+      armer(coupure(), [{ id: 'cmd-coupure', smsLogId: null }]);
+
+      await service.onAccuseSmsMoteur(evt());
+
+      expect(prisma.engineControlCommand.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ action: 'CUT', createdAt: { lte: expect.any(Date) } }),
+        }),
+      );
+      expect(prisma.engineControlCommand.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: 'SENT_UNCONFIRMED',
+            activeKey: null,
+            lastError: expect.stringContaining('supplantée'),
+          }),
+        }),
+      );
+    });
+
+    it('🔴 le constat NE TOUCHE PAS au reste : aucun SMS annulé, planning intact (un SMS usurpé ne doit pas défaire un antivol)', async () => {
+      armer(coupure(), [{ id: 'cmd-coupure', smsLogId: 'sms-coupure' }]);
+      prisma.vehicleSchedule.findFirst.mockResolvedValue({ ...enabledScheduleWindowed, overrideUntil: GEL } as never);
+      const sms = testModule.get(SmsGatewayService) as unknown as { cancelOutbound: jest.Mock };
+
+      await service.onAccuseSmsMoteur(evt());
+      await new Promise((r) => setTimeout(r, 5));
+
+      expect(sms.cancelOutbound).not.toHaveBeenCalled();
+      expect(prisma.vehicleSchedule.findFirst).not.toHaveBeenCalled();
+      expect(prisma.vehicleSchedule.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('un humain est prévenu : le constat est écrit au centre d’alerte', async () => {
+      armer(coupure());
+      await service.onAccuseSmsMoteur(evt());
+      expect(errorLogger.record).toHaveBeenCalledWith(
+        expect.stringContaining('Remise en route constatée par SMS'),
+        'engine-control',
+        expect.objectContaining({ imei: '860000000000971' }),
+        expect.anything(),
+      );
+    });
+
+    it('🔴 la ligne est DATÉE de la réception du SMS : une coupure demandée ensuite reste plus récente', async () => {
+      armer(coupure());
+      const recuA = new Date(Date.now() - 90_000);
+      const message = { smsLogId: 'log-971', fromNumber: SIM, toNumber: '+33656691615', body: 'Resume engine Succeed', receivedAt: recuA.toISOString() } as never;
+
+      await service.onAccuseSmsMoteur(message);
+
+      expect(prisma.engineControlCommand.create.mock.calls[0][0].data.createdAt).toEqual(recuA);
+    });
+
+    it('🔴 une remise en route de Tracky partie par SMS et sans accusé : la réponse est probablement la sienne — rien n’est constaté', async () => {
+      prisma.tracker.findMany.mockResolvedValue([
+        { id: 'trk-1', imei: '860000000000971', vehicle: { id: 'veh-1', fleetId: 'fleet-1' } },
+      ] as never);
+      prisma.engineControlCommand.findFirst
+        .mockResolvedValueOnce(null as never) // aucune commande accusable
+        .mockResolvedValueOnce(coupure() as never) // dernière intention : une coupure
+        .mockResolvedValueOnce(null as never) // pas déjà constaté
+        .mockResolvedValueOnce({ id: 'restore-sms-en-vol' } as never); // la RESTORE de Tracky, partie par SMS
+
+      await service.onAccuseSmsMoteur(evt());
+
+      expect(prisma.engineControlCommand.create).not.toHaveBeenCalled();
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('un SMS rejoué par le webhook ne produit qu’une ligne', async () => {
+      prisma.tracker.findMany.mockResolvedValue([
+        { id: 'trk-1', imei: '860000000000971', vehicle: { id: 'veh-1', fleetId: 'fleet-1' } },
+      ] as never);
+      prisma.engineControlCommand.findFirst
+        .mockResolvedValueOnce(null as never)
+        .mockResolvedValueOnce(coupure() as never)
+        .mockResolvedValueOnce({ id: 'deja-constate' } as never);
+
+      await service.onAccuseSmsMoteur(evt());
+
+      expect(prisma.engineControlCommand.create).not.toHaveBeenCalled();
+    });
+
+    it('🔴 une RESTORE d’hier ÉCHUE (SENT_UNCONFIRMED) n’avale pas le « Resume » de ce matin : une coupure plus récente la suit', async () => {
+      // Relecture du 29/10 : sans cette garde, la RESTORE d'hier était acquittée « maintenant », la
+      // remise en route constatée n'était jamais appelée, et l'écran restait sur « coupé ».
+      prisma.tracker.findMany.mockResolvedValue([
+        { id: 'trk-1', imei: '860000000000971', vehicle: { id: 'veh-1', fleetId: 'fleet-1' } },
+      ] as never);
+      prisma.engineControlCommand.findFirst
+        .mockResolvedValueOnce({ id: 'restore-hier', createdAt: new Date(Date.now() - 20 * 3600_000), status: 'SENT_UNCONFIRMED' } as never) // accusable (échue)
+        .mockResolvedValueOnce({ id: 'coupure-ce-matin' } as never) // MAIS une demande CONTRAIRE (coupure) l'a suivie
+        .mockResolvedValueOnce(coupure() as never) // → constat : dernière intention
+        .mockResolvedValueOnce(null as never)
+        .mockResolvedValueOnce(null as never);
+
+      await service.onAccuseSmsMoteur(evt());
+
+      const acquittee = prisma.engineControlCommand.updateMany.mock.calls.some(
+        ([arg]) => arg?.where?.id === 'restore-hier',
+      );
+      expect(acquittee).toBe(false); // la RESTORE d’hier ne doit pas être acquittée par le SMS de ce matin
+      expect(prisma.engineControlCommand.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('une commande échue SANS demande contraire depuis reste acquittable (le cas du 06/10)', async () => {
+      prisma.tracker.findMany.mockResolvedValue([
+        { id: 'trk-1', imei: '860000000000971', vehicle: { id: 'veh-1', fleetId: 'fleet-1' } },
+      ] as never);
+      prisma.engineControlCommand.findFirst
+        .mockResolvedValueOnce({ id: 'coupure-echue', createdAt: new Date(Date.now() - 3600_000), status: 'SENT_UNCONFIRMED' } as never)
+        .mockResolvedValueOnce(null as never); // aucune demande contraire depuis
+      prisma.engineControlCommand.findUnique.mockResolvedValue({ id: 'coupure-echue' } as never);
+
+      await service.onAccuseSmsMoteur(evt('Stop engine Succeed'));
+
+      expect(prisma.engineControlCommand.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: 'coupure-echue' }),
+          data: expect.objectContaining({ status: 'ACKNOWLEDGED' }),
+        }),
+      );
+    });
+
+    it('🔴 la dernière intention est DÉJÀ une remise en route : rien n’est inventé', async () => {
+      armer(coupure({ action: EngineAction.RESTORE, status: CommandStatus.ACKNOWLEDGED }));
+      await service.onAccuseSmsMoteur(evt());
+      expect(prisma.engineControlCommand.create).not.toHaveBeenCalled();
+    });
+
+    it('aucune intention connue pour ce boîtier : rien n’est inventé', async () => {
+      armer(null);
+      await service.onAccuseSmsMoteur(evt());
+      expect(prisma.engineControlCommand.create).not.toHaveBeenCalled();
+    });
+
+    it('🔴 une coupure demandée à l’instant n’est pas annulée par la réponse d’un ordre antérieur', async () => {
+      armer(coupure({ createdAt: new Date(Date.now() - 4_000) }));
+      await service.onAccuseSmsMoteur(evt());
+      expect(prisma.engineControlCommand.create).not.toHaveBeenCalled();
+    });
+
+    it('« Stop engine Succeed » ne crée jamais de remise en route', async () => {
+      prisma.tracker.findMany.mockResolvedValue([
+        { id: 'trk-1', imei: '860000000000971', vehicle: { id: 'veh-1', fleetId: 'fleet-1' } },
+      ] as never);
+      prisma.engineControlCommand.findFirst.mockResolvedValue(null as never);
+      await service.onAccuseSmsMoteur(evt('Stop engine Succeed'));
+      expect(prisma.engineControlCommand.create).not.toHaveBeenCalled();
+    });
+
+    it('sans compte de service, la ligne est portée par l’auteur de la coupure (jamais perdue)', async () => {
+      armer(coupure());
+      prisma.user.findFirst.mockResolvedValue(null as never);
+      await service.onAccuseSmsMoteur(evt());
+      expect(prisma.engineControlCommand.create.mock.calls[0][0].data.requestedBy).toBe('user-veilleur');
+    });
+
+    it('🔴 une panne de ce chemin NE CASSE PAS le flux SMS entrant', async () => {
+      armer(coupure());
+      prisma.engineControlCommand.create.mockRejectedValue(new Error('DB down') as never);
+      await expect(service.onAccuseSmsMoteur(evt())).resolves.toBeUndefined();
+    });
+
+    it('🔴 un accusé « Stop engine Succeed » acquitte aussi une coupure ÉCHUE (SENT_UNCONFIRMED), pas une supplantée', async () => {
+      prisma.tracker.findMany.mockResolvedValue([
+        { id: 'trk-1', imei: '860000000000971', vehicle: { id: 'veh-1', fleetId: 'fleet-1' } },
+      ] as never);
+      prisma.engineControlCommand.findFirst.mockResolvedValue({ id: 'cmd-1', createdAt: new Date() } as never);
+      prisma.engineControlCommand.findUnique.mockResolvedValue({ id: 'cmd-1' } as never);
+
+      await service.onAccuseSmsMoteur(evt('Stop engine Succeed'));
+
+      const where = prisma.engineControlCommand.updateMany.mock.calls[0][0].where;
+      expect(where.ackedAt).toBeNull();
+      expect(where.OR).toEqual(
+        expect.arrayContaining([
+          { status: 'SENT' },
+          { status: 'SENT_UNCONFIRMED', lastError: null },
+          expect.objectContaining({
+            status: 'SENT_UNCONFIRMED',
+            NOT: [
+              { lastError: { startsWith: 'CUT supplantée par une intention RESTORE plus récente' } },
+              { lastError: { startsWith: 'RESTORE supplantée par une intention CUT plus récente' } },
+            ],
+          }),
+        ]),
+      );
+    });
+  });
+
+  /**
+   * ══ SYNCHRONISATION MANUELLE D'UN BOÎTIER (29/10/2026) ══════════════════════════════════════
+   *
+   * Décision du propriétaire : AUCUN secours SMS automatique pour une coupure (un SMS coûte, et le cas est
+   * rare). Un véhicule sans GPS dont la coupure n'est pas confirmée se synchronise à la DEMANDE de
+   * l'utilisateur qui insiste. Le même ordre repart par un canal de secours, avec une validité de 2 min ;
+   * la réponse du boîtier remet l'écran d'accord. L'écran ne nomme jamais ce canal.
+   *
+   * Deuxième relecture contradictoire (29/10) : réservation atomique (un seul message même à deux onglets),
+   * véhicule qui a bougé, course avec une remise en route, coupure visée désignée par l'écran.
+   */
+  describe('synchronisation manuelle du boîtier — jamais automatique', () => {
+    const boitier = { ...trackerWithVehicle, simPhoneNumber: '+345901030609501' };
+    type Sms = { isEnabled: jest.Mock; send: jest.Mock; cancelOutbound: jest.Mock };
+    let sms: Sms;
+    const coupure = (over: Record<string, unknown> = {}) =>
+      createdCommand({
+        id: 'cmd-cut',
+        action: EngineAction.CUT,
+        status: CommandStatus.SENT,
+        channel: 'TCP',
+        source: 'MANUAL',
+        smsAttemptCount: 0,
+        attemptCount: 1,
+        createdAt: new Date(Date.now() - 60_000),
+        sentAt: new Date(Date.now() - 60_000),
+        ...over,
+      });
+    type Utilisateur = { userId: string; role: UserRole; fleetId: string };
+    const sync = (user: Utilisateur = fleetAdmin, commandId?: string) =>
+      service.synchroniserBoitier(TRACKER_ID, user, commandId);
+    /** Les appels à updateMany qui écrivent le canal « SMS » : l'écriture finale de la synchronisation. */
+    const ecrituresDeCanal = () =>
+      prisma.engineControlCommand.updateMany.mock.calls.filter(([arg]) => arg?.data?.channel === 'SMS');
+
+    beforeEach(() => {
+      sms = testModule.get(SmsGatewayService) as unknown as Sms;
+      sms.isEnabled.mockReturnValue(true);
+      sms.send.mockResolvedValue({ ok: true, outcome: 'accepted', smsLogId: 'sms-1', twilioSid: 'sid-1', submittedStatus: 'queued' });
+      prisma.tracker.findFirst.mockResolvedValue(boitier as never);
+      // 1er findFirst : la dernière intention du boîtier ; les suivants (demande plus récente ?) : aucune.
+      prisma.engineControlCommand.findFirst.mockResolvedValueOnce(coupure() as never).mockResolvedValue(null as never);
+      prisma.engineControlCommand.findUnique.mockResolvedValue(coupure({ channel: 'SMS', smsAttemptCount: 1 }) as never);
+      prisma.position.findFirst.mockResolvedValue(null as never); // aucune position en mouvement depuis l'ordre
+    });
+
+    it('🔴 AUCUN SMS automatique quand la socket TCP est ouverte : une coupure manuelle sans écho reste « envoyée » — c’est l’utilisateur qui décide', async () => {
+      prisma.engineControlCommand.findFirst.mockReset();
+      prisma.engineControlCommand.findFirst.mockResolvedValue(null as never); // aucune coupure déjà en vol
+      prisma.tracker.findFirst.mockResolvedValue(trackerWithVehicle);
+      prisma.position.findFirst.mockResolvedValue(recentPosition(0));
+      registry.send.mockReturnValue(true);
+      ackWaiter.waitForAck.mockRejectedValue(new Error('ACK timeout after 15000ms'));
+
+      await service.requestCommand(TRACKER_ID, EngineAction.CUT, null, fleetAdmin);
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(sms.send).not.toHaveBeenCalled();
+    });
+
+    it('🔴 sur demande : le MÊME ordre part, avec une validité de 2 min — « stop<mot de passe du boîtier> »', async () => {
+      await sync();
+
+      expect(sms.send).toHaveBeenCalledTimes(1);
+      const [numero, corps, options] = sms.send.mock.calls[0];
+      expect(numero).toBe('+345901030609501');
+      expect(corps).toBe('stop123456');
+      // 120 s, pas 900 : il double un ordre TCP déjà parti, il n'a de sens que s'il arrive vite.
+      expect(options).toMatchObject({ action: 'CUT', priority: 'engine_cut', ttlSeconds: 120, commandId: 'cmd-cut' });
+    });
+
+    it('la commande garde son identité et note le canal : l’écran attend la réponse du boîtier', async () => {
+      const rendue = await sync();
+
+      const [ecriture] = ecrituresDeCanal().at(-1) ?? [];
+      expect(ecriture.where).toMatchObject({ id: 'cmd-cut', ackedAt: null });
+      expect(ecriture.data).toMatchObject({ channel: 'SMS', smsLogId: 'sms-1', smsAttemptCount: 1 });
+      expect(rendue).toMatchObject({ id: 'cmd-cut', channel: 'SMS' });
+      expect(gateway.emitEngineCommandUpdate).toHaveBeenCalledWith(FLEET_ID, expect.objectContaining({ commandId: 'cmd-cut', channel: 'SMS' }));
+    });
+
+    it('🔴 RÉSERVATION ATOMIQUE avant tout envoi : l’instruction vise smsAttemptCount = 0, et si quelqu’un l’a prise, aucun message ne part', async () => {
+      prisma.engineControlCommand.updateMany.mockResolvedValueOnce({ count: 0 } as never); // l'autre onglet est passé le premier
+      await expect(sync()).rejects.toThrow(ConflictException);
+
+      const reservation = prisma.engineControlCommand.updateMany.mock.calls[0][0];
+      expect(reservation.where).toMatchObject({ id: 'cmd-cut', ackedAt: null, smsAttemptCount: 0 });
+      expect(reservation.data).toEqual({ smsAttemptCount: 1 });
+      expect(sms.send).not.toHaveBeenCalled();
+    });
+
+    it('la réservation écarte aussi les canaux NULL (NOT(NULL) est NULL en SQL) et les commandes supplantées', async () => {
+      await sync();
+      const { AND } = prisma.engineControlCommand.updateMany.mock.calls[0][0].where;
+      expect(AND[0]).toEqual({ OR: [{ channel: null }, { channel: { not: 'SMS' } }] });
+      expect(AND[1].OR).toEqual(expect.arrayContaining([{ status: 'SENT' }, { status: 'SENT_UNCONFIRMED', lastError: null }]));
+    });
+
+    it('la synchronisation est tracée (qui, quel véhicule) — jamais comme une coupure', async () => {
+      const activite = testModule.get(SystemActivityService) as unknown as { record: jest.Mock };
+      await sync();
+      expect(activite.record).toHaveBeenCalledWith(
+        expect.objectContaining({ category: 'ENGINE', action: 'engine_sync', status: 'SUCCESS', triggeredByUserId: USER_ID }),
+      );
+    });
+
+    it('une coupure ÉCHUE sans preuve (SENT_UNCONFIRMED) est synchronisable — c’est le cas du 28/10 22:08', async () => {
+      prisma.engineControlCommand.findFirst.mockReset();
+      prisma.engineControlCommand.findFirst
+        .mockResolvedValueOnce(coupure({ status: CommandStatus.SENT_UNCONFIRMED }) as never)
+        .mockResolvedValue(null as never);
+      await sync();
+      expect(sms.send).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['le dernier ordre est une remise en route', { action: EngineAction.RESTORE }],
+      ['le boîtier a déjà confirmé', { status: CommandStatus.ACKNOWLEDGED, ackedAt: new Date() }],
+      ['l’ordre est encore en cours d’envoi', { status: CommandStatus.PENDING }],
+      ['la coupure a été remplacée par une remise en route', { status: CommandStatus.SENT_UNCONFIRMED, lastError: 'CUT supplantée par une intention RESTORE plus récente' }],
+      ['une synchronisation a déjà été lancée', { smsAttemptCount: 1 }],
+      ['la coupure est déjà repartie par le canal de secours', { channel: 'SMS' }],
+    ])('🔴 refusé (409) quand %s — aucun message n’est émis', async (_nom, over) => {
+      prisma.engineControlCommand.findFirst.mockReset();
+      prisma.engineControlCommand.findFirst.mockResolvedValue(coupure(over) as never);
+      await expect(sync()).rejects.toThrow(ConflictException);
+      expect(sms.send).not.toHaveBeenCalled();
+    });
+
+    it('refusé (409) quand le boîtier n’a reçu aucun ordre depuis 24 h', async () => {
+      prisma.engineControlCommand.findFirst.mockReset();
+      prisma.engineControlCommand.findFirst.mockResolvedValue(null as never);
+      await expect(sync()).rejects.toThrow(ConflictException);
+      expect(sms.send).not.toHaveBeenCalled();
+    });
+
+    it('🔴 le véhicule a BOUGÉ depuis l’ordre : refusé (409) — renvoyer « stop » immobiliserait un véhicule en service', async () => {
+      prisma.position.findFirst.mockResolvedValue({ id: 'pos-en-mouvement' } as never);
+      await expect(sync()).rejects.toThrow(ConflictException);
+
+      expect(prisma.position.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ trackerId: TRACKER_ID, speedKmh: { gt: 5 }, timestamp: { gt: expect.any(Date) } }),
+        }),
+      );
+      expect(sms.send).not.toHaveBeenCalled();
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('un véhicule en souterrain (aucune position après l’ordre) reste servi', async () => {
+      prisma.position.findFirst.mockResolvedValue(null as never);
+      await sync();
+      expect(sms.send).toHaveBeenCalledTimes(1);
+    });
+
+    it('🔴 l’écran désigne la coupure qu’il a montrée : une autre coupure entre-temps → 409, rien n’est envoyé', async () => {
+      await expect(sync(fleetAdmin, 'une-autre-commande')).rejects.toThrow(ConflictException);
+      expect(sms.send).not.toHaveBeenCalled();
+    });
+
+    it('la bonne coupure désignée passe', async () => {
+      await sync(fleetAdmin, 'cmd-cut');
+      expect(sms.send).toHaveBeenCalledTimes(1);
+    });
+
+    it('🔴 canal de secours indisponible : erreur CLAIRE (503), la réservation est RENDUE (on pourra réessayer), aucun canal écrit', async () => {
+      sms.isEnabled.mockReturnValue(false);
+      await expect(sync()).rejects.toThrow(ServiceUnavailableException);
+
+      expect(ecrituresDeCanal()).toHaveLength(0);
+      const rendu = prisma.engineControlCommand.updateMany.mock.calls.at(-1)?.[0];
+      expect(rendu.where).toMatchObject({ id: 'cmd-cut', smsAttemptCount: 1 });
+      expect(rendu.data).toEqual({ smsAttemptCount: 0 });
+    });
+
+    it('un message refusé par la passerelle donne la même erreur claire, et rend la réservation', async () => {
+      sms.send.mockResolvedValue({ ok: false, error: 'passerelle injoignable' });
+      await expect(sync()).rejects.toThrow(ServiceUnavailableException);
+      expect(ecrituresDeCanal()).toHaveLength(0);
+      expect(prisma.engineControlCommand.updateMany.mock.calls.at(-1)?.[0].data).toEqual({ smsAttemptCount: 0 });
+    });
+
+    it('🔴 l’écran ne nomme JAMAIS le canal : aucun message d’erreur ne contient « SMS »', async () => {
+      const messages: string[] = [];
+      const essayer = async (): Promise<void> => {
+        try {
+          await sync();
+        } catch (err) {
+          messages.push((err as Error).message);
+        }
+      };
+      for (const over of [{ action: EngineAction.RESTORE }, { status: CommandStatus.ACKNOWLEDGED, ackedAt: new Date() }, { status: CommandStatus.PENDING }, { smsAttemptCount: 1 }, { channel: 'SMS' }]) {
+        prisma.engineControlCommand.findFirst.mockReset();
+        prisma.engineControlCommand.findFirst.mockResolvedValue(coupure(over) as never);
+        await essayer();
+      }
+      prisma.engineControlCommand.findFirst.mockReset();
+      prisma.engineControlCommand.findFirst.mockResolvedValueOnce(coupure() as never).mockResolvedValue(null as never);
+      sms.isEnabled.mockReturnValue(false);
+      await essayer();
+      prisma.engineControlCommand.findFirst.mockReset();
+      prisma.engineControlCommand.findFirst.mockResolvedValue(coupure() as never);
+      prisma.position.findFirst.mockResolvedValue({ id: 'p' } as never);
+      await essayer();
+      prisma.engineControlCommand.findFirst.mockReset();
+      prisma.engineControlCommand.findFirst.mockResolvedValue(coupure() as never);
+      await expect(sync(fleetAdmin, 'autre')).rejects.toThrow();
+      expect(messages.length).toBeGreaterThan(6);
+      for (const m of messages) expect(m).not.toMatch(/sms/i);
+    });
+
+    it('🔴 écriture perdue (acquittée entre-temps) : le message devenu inutile est rappelé au relais', async () => {
+      prisma.engineControlCommand.updateMany
+        .mockResolvedValueOnce({ count: 1 } as never) // réservation
+        .mockResolvedValueOnce({ count: 0 } as never); // écriture finale : acquittée entre-temps
+      await sync();
+      await new Promise((r) => setTimeout(r, 5));
+      expect(sms.cancelOutbound).toHaveBeenCalledWith('sms-1');
+    });
+
+    it('🔴 COURSE avec une remise en route : la coupure est remplacée PENDANT l’envoi (son smsLogId n’était pas encore écrit) → message rappelé, 409', async () => {
+      prisma.engineControlCommand.findUnique.mockResolvedValue(
+        coupure({ status: CommandStatus.SENT_UNCONFIRMED, lastError: 'CUT supplantée par une intention RESTORE plus récente' }) as never,
+      );
+      await expect(sync()).rejects.toThrow(ConflictException);
+      await new Promise((r) => setTimeout(r, 5));
+      expect(sms.cancelOutbound).toHaveBeenCalledWith('sms-1');
+    });
+
+    it('🔴 COURSE, autre forme : une demande plus récente apparaît pendant l’envoi → message rappelé, 409', async () => {
+      prisma.engineControlCommand.findFirst.mockReset();
+      prisma.engineControlCommand.findFirst
+        .mockResolvedValueOnce(coupure() as never)
+        .mockResolvedValueOnce({ id: 'cmd-restore' } as never);
+      await expect(sync()).rejects.toThrow(ConflictException);
+      await new Promise((r) => setTimeout(r, 5));
+      expect(sms.cancelOutbound).toHaveBeenCalledWith('sms-1');
+    });
+
+    it('🔴 cloisonnement : un utilisateur d’une autre société ne peut pas viser ce boîtier (404, aucun message)', async () => {
+      prisma.tracker.findFirst.mockResolvedValue(null as never);
+      await expect(sync(otherFleetAdmin)).rejects.toThrow(NotFoundException);
+      expect(prisma.tracker.findFirst.mock.calls.at(-1)?.[0].where).toMatchObject({ id: TRACKER_ID, vehicle: { fleetId: OTHER_FLEET_ID } });
+      expect(sms.send).not.toHaveBeenCalled();
+    });
+
+    it('un boîtier sans véhicule : refusé (400)', async () => {
+      prisma.tracker.findFirst.mockResolvedValue(trackerWithoutVehicle as never);
+      await expect(sync(superAdmin)).rejects.toThrow(BadRequestException);
+    });
+
+    it('la demande d’une remise en route rappelle ensuite le SMS de synchronisation encore valide (une coupure en retard ne doit jamais suivre un rallumage)', async () => {
+      await sync();
+      prisma.engineControlCommand.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: 'cmd-cut', smsLogId: 'sms-1' }]);
+      prisma.tracker.findFirst.mockResolvedValue(trackerWithVehicle);
+
+      await service.requestCommand(TRACKER_ID, EngineAction.RESTORE, null, fleetAdmin, 'MANUAL');
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(sms.cancelOutbound).toHaveBeenCalledWith('sms-1');
+    });
+
+    describe('« Stop engine Succeed » reçu APRÈS une remise en route', () => {
+      const SIM = '+345901030609501';
+      const reponse = () =>
+        ({ smsLogId: 'log-stop', fromNumber: SIM, toNumber: '+33656691615', body: 'Stop engine Succeed', receivedAt: new Date().toISOString() }) as never;
+
+      it('🔴 CRITICAL au centre d’alerte : un message de coupure en retard vient de RE-COUPER le véhicule', async () => {
+        prisma.tracker.findMany.mockResolvedValue([{ id: 'trk-1', imei: '860000000000971', vehicle: { id: 'veh-1', fleetId: 'fleet-1' } }] as never);
+        prisma.engineControlCommand.findFirst.mockReset();
+        prisma.engineControlCommand.findFirst
+          .mockResolvedValueOnce(null as never) // aucune coupure accusable
+          .mockResolvedValueOnce(createdCommand({ id: 'cmd-restore', action: EngineAction.RESTORE, status: CommandStatus.ACKNOWLEDGED, createdAt: new Date(Date.now() - 60_000) }) as never);
+
+        await service.onAccuseSmsMoteur(reponse());
+
+        expect(errorLogger.record).toHaveBeenCalledWith(
+          expect.stringContaining('RE-COUPÉ'),
+          'engine-control',
+          expect.objectContaining({ commandId: 'cmd-restore' }),
+          'CRITICAL',
+        );
+      });
+
+      it('rien si la dernière demande est une coupure : c’est la réponse normale', async () => {
+        prisma.tracker.findMany.mockResolvedValue([{ id: 'trk-1', imei: '860000000000971', vehicle: { id: 'veh-1', fleetId: 'fleet-1' } }] as never);
+        prisma.engineControlCommand.findFirst.mockReset();
+        prisma.engineControlCommand.findFirst
+          .mockResolvedValueOnce(null as never)
+          .mockResolvedValueOnce(createdCommand({ action: EngineAction.CUT, status: CommandStatus.SENT }) as never);
+
+        await service.onAccuseSmsMoteur(reponse());
+
+        expect(errorLogger.record).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -2486,6 +3061,24 @@ describe('EngineControlService', () => {
         where: { id: 'cut-sms', status: CommandStatus.SENT_UNCONFIRMED },
         data: { lastError: expect.stringContaining('SMS annulé au relais') },
       });
+    });
+
+    it('🔴 relecture du 29/10 : une RESTORE rappelle AUSSI le SMS d’une coupure DÉJÀ acquittée (écho tardif) — il ne doit pas re-couper après le rallumage', async () => {
+      const sms = testModule.get(SmsGatewayService) as unknown as { cancelOutbound: jest.Mock };
+      prisma.tracker.findFirst.mockResolvedValue(trackerWithVehicle);
+      prisma.engineControlCommand.findMany
+        .mockResolvedValueOnce([]) // aucune coupure ouverte (celle-ci a été acquittée par l'écho)
+        .mockResolvedValueOnce([{ id: 'cut-acquittee', smsLogId: 'sms-secours' }]); // mais son SMS de secours est encore valide
+
+      await service.requestCommand(TRACKER_ID, EngineAction.RESTORE, null, fleetAdmin, 'MANUAL');
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(prisma.engineControlCommand.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ action: EngineAction.CUT, smsLogId: { not: null }, lastAttemptAt: { gte: expect.any(Date) } }),
+        }),
+      );
+      expect(sms.cancelOutbound).toHaveBeenCalledWith('sms-secours');
     });
 
     it('T41 : un refus d annulation (message déjà pris par le téléphone) ne bloque ni ne casse la RESTORE', async () => {

@@ -114,3 +114,50 @@ describe('C7 — EngineControlController.listCommands : ouverture au veilleur, p
     );
   });
 });
+
+describe('EngineControlController — synchronisation manuelle du boîtier (29/10/2026)', () => {
+  const user = {
+    id: 'user-1', authUserId: 'auth-1', email: 'veilleur@example.test', firstName: null,
+    lastName: null, role: UserRole.NIGHT_WATCHMAN, isOwner: false, fleetId: 'fleet-1',
+    isActive: true, permissions: null,
+  };
+  const request = { user } as unknown as AuthenticatedRequest;
+
+  it('la route transmet le boîtier ET l’utilisateur (rôle, société) au service : le cloisonnement y est fait', async () => {
+    const engineControl = { synchroniserBoitier: jest.fn().mockResolvedValue({ id: 'cmd-1' }) };
+    const controller = new EngineControlController(engineControl as never, {} as never, {} as never, {} as never);
+
+    await expect(controller.synchroniser('tracker-1', request)).resolves.toEqual({ id: 'cmd-1' });
+    expect(engineControl.synchroniserBoitier).toHaveBeenCalledWith('tracker-1', {
+      userId: 'user-1', role: UserRole.NIGHT_WATCHMAN, fleetId: 'fleet-1',
+    }, undefined);
+  });
+
+  it('la coupure désignée par l’écran est transmise : le serveur refuse si une autre l’a remplacée', async () => {
+    const engineControl = { synchroniserBoitier: jest.fn().mockResolvedValue({ id: 'cmd-1' }) };
+    const controller = new EngineControlController(engineControl as never, {} as never, {} as never, {} as never);
+
+    await controller.synchroniser('tracker-1', request, { commandId: '0f6c4e0e-6f55-4c5e-9d1b-2f5c9a8d7b11' });
+    expect(engineControl.synchroniserBoitier).toHaveBeenCalledWith(
+      'tracker-1',
+      expect.objectContaining({ userId: 'user-1' }),
+      '0f6c4e0e-6f55-4c5e-9d1b-2f5c9a8d7b11',
+    );
+  });
+
+  it('🔴 la route est gardée comme l’envoi d’une commande : mêmes rôles, et la permission `engine_control` PAR VÉHICULE', () => {
+    const handler = EngineControlController.prototype.synchroniser;
+    const envoi = EngineControlController.prototype.requestCommand;
+    expect(Reflect.getMetadata('roles', handler)).toEqual(Reflect.getMetadata('roles', envoi));
+    expect(Reflect.getMetadata('roles', handler)).toContain(UserRole.NIGHT_WATCHMAN);
+    const exigence = Reflect.getMetadata('required-vehicle-permissions', handler);
+    expect(exigence).toEqual(Reflect.getMetadata('required-vehicle-permissions', envoi));
+    expect(exigence).toMatchObject({ keys: ['engine_control'], paramName: 'trackerId' });
+  });
+
+  it('c’est une écriture (POST), jamais une lecture', () => {
+    // RequestMethod.POST = 1 dans NestJS (GET = 0).
+    expect(Reflect.getMetadata('method', EngineControlController.prototype.synchroniser)).toBe(1);
+    expect(Reflect.getMetadata('path', EngineControlController.prototype.synchroniser)).toBe('trackers/:trackerId/sync');
+  });
+});

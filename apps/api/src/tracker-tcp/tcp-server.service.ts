@@ -18,6 +18,9 @@ import { UnknownTrackerRegistry } from '../unknown-trackers/unknown-trackers.reg
 import { DemoModeService } from '../demo/demo-mode.service';
 import { lireEchoMoteur, TRACKER_ENGINE_ECHO_EVENT, type TrackerEngineEchoEvent } from './echo-moteur';
 
+/** Écart maximal entre l'horloge interne d'un boîtier SANS GPS et la réception, pour dater un écho moteur. */
+const ECHO_SANS_GPS_DERIVE_MAX_MS = 2 * 60_000;
+
 @Injectable()
 export class TcpServerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TcpServerService.name);
@@ -418,6 +421,43 @@ export class TcpServerService implements OnModuleInit, OnModuleDestroy {
         // étaient jetées en `unknown` → le boîtier restait invisible bien que vivant.
         if (!currentImei || frame.imei !== currentImei) break;
         this.registry.touch(frame.imei);
+        // ══ 29/10/2026 — L'ÉCHO MOTEUR D'UN BOÎTIER SANS GPS (incident CDEF31, MH-971-TD) ═══════════
+        //
+        // Un boîtier qui exécute `J` / `K` répond `imei:…,jt,…` / `imei:…,kt,…`. Quand il n'a pas de
+        // fix (souterrain, parking couvert), cette réponse porte le drapeau `L` et aucune coordonnée :
+        // le décodeur la classe `no_fix`, PAS `position`. Or seul `position` rapprochait l'écho d'un
+        // guetteur : ici, rien. Mesuré dans `wire_logs` :
+        //
+        //   28/10 22:08:00  J envoyé (planning)  → `jt` à 22:08:04 (4 s),  trame `no_fix`
+        //   29/10 06:45:04  J envoyé (veilleur)  → `jt` à 06:45:07 (3 s),  trame `no_fix`
+        //
+        // Les deux fois, le boîtier avait coupé en moins de 5 s, bien dans les 15 s du guetteur — et la
+        // commande est restée « envoyée » puis « non confirmée ». L'écran ne la comptait pas comme une
+        // coupure : « Couper » en rouge sur un véhicule déjà immobilisé, « Rallumer » grisé. Le
+        // veilleur n'a pas pu rallumer ; le propriétaire a dû envoyer un SMS à la main.
+        //
+        // Même rapprochement que pour une position : guetteur d'abord, puis diffusion de l'écho
+        // orphelin. Avant l'écriture en base : une panne de la base ne doit pas faire perdre un accusé.
+        //
+        // ⚠️ Relecture contradictoire du 29/10 : (1) SEULEMENT pour un écho `jt`/`kt`. Une trame sans GPS
+        // ordinaire (rapport LBS) n'a jamais été proposée aux guetteurs ; la leur donner aurait permis à
+        // une commande générique en attente (`position_single`, motif `imei:…,`) de l'avaler. (2) L'heure
+        // d'une trame sans GPS vient de l'horloge INTERNE du boîtier — réglable (UTC+1, UTC+2), ou remise à
+        // zéro — et non du GPS : elle ne date l'écho que si elle tombe à moins de 2 min de la réception.
+        // Sinon l'écho est diffusé SANS heure, donc ignoré par `onEchoMoteur` : on ne rapproche jamais à
+        // l'aveugle un `jt` d'un tampon revidé d'une coupure récente.
+        if (lireEchoMoteur(currentImei, frame.raw) !== null) {
+          const accuseSolde = this.ackWaiter.tryMatch(currentImei, frame.raw);
+          if (!accuseSolde) {
+            const ecart = frame.deviceTime ? Math.abs(frame.deviceTime.getTime() - Date.now()) : Number.POSITIVE_INFINITY;
+            this.signalerEchoMoteurOrphelin(
+              currentImei,
+              socket,
+              frame.raw,
+              ecart <= ECHO_SANS_GPS_DERIVE_MAX_MS ? frame.deviceTime : null,
+            );
+          }
+        }
         // `lastNoFixAt` : marque que le boitier tente ACTIVEMENT de reporter mais SANS
         // lock GPS. Couple a un `lastPositionAt` perime, c'est la preuve « GPS perdu »
         // (antenne / ciel) — cf. Tracker.lastNoFixAt + getVehicleConnectivityState.

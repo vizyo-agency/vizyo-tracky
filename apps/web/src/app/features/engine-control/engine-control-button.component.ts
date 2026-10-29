@@ -1,9 +1,9 @@
 import { swallow } from '../../core/error/swallow';
 import { HttpErrorResponse } from '@angular/common/http';
-import { Component, computed, DestroyRef, effect, inject, input, OnInit, output, signal } from '@angular/core';
+import { Component, computed, DestroyRef, effect, ElementRef, inject, input, OnInit, output, signal, viewChild } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
-import { LucideAngularModule, Power, PowerOff } from 'lucide-angular';
+import { CircleCheck, LoaderCircle, LucideAngularModule, Power, PowerOff, TriangleAlert } from 'lucide-angular';
 import {
   DORMANT_STOP_ACTING_MS,
   formatSilenceLabel,
@@ -50,6 +50,48 @@ const COUPE_POSSIBLE: ReadonlySet<EngineControlCommandDto['status']> = new Set([
  * doit alors rester offert, sinon il resterait grisé pour toujours.
  */
 const PENDING_ORPHELINE_MS = 120_000;
+
+/**
+ * ══ LA FENÊTRE D'ATTENTE (29/10/2026) ═══════════════════════════════════════════════════════
+ *
+ * Après le glissement de confirmation, la modale se fermait et il ne restait qu'un toast de 8 s :
+ * rien ne disait que l'ordre était parti, ni où il en était. Mesuré chez CDEF31 : onze « couper »
+ * d'affilée un soir de 06/10, vingt-trois « rallumer » en six secondes une nuit de septembre. On ne
+ * clique pas vingt fois sur un écran qui répond — on clique quand il ne dit rien.
+ *
+ * Désormais une fenêtre s'ouvre à l'instant du geste, bloque l'écran, et suit la commande jusqu'à
+ * son issue : confirmée, échouée, ou « sans preuve » après SUIVI_MAX_MS. Ces durées sont celles de
+ * l'API (15 s avant le secours SMS, ENGINE_ACK_TIMEOUT_MS).
+ */
+const SUIVI_ATTENTE_LONGUE_MS = 15_000;
+/** Au-delà, la fenêtre cesse de promettre : la commande peut encore aboutir, l'écran ne l'attend plus. */
+const SUIVI_MAX_MS = 150_000;
+/** Délai avant de proposer « Masquer » : assez long pour ne pas inviter à fuir, assez court pour ne pas piéger. */
+const SUIVI_MASQUER_APRES_MS = 10_000;
+/** Succès : la fenêtre se referme seule, le temps de lire « Moteur coupé ». */
+const SUIVI_FERMETURE_OK_MS = 1_800;
+/** Relecture de la liste pendant le suivi : le WebSocket peut être coupé, le suivi ne doit pas en dépendre. */
+const SUIVI_RELECTURE_MS = 2_000;
+
+type SuiviPhase = 'envoi' | 'attente' | 'attente-longue' | 'sms' | 'ok' | 'echec' | 'sans-preuve';
+
+interface SuiviVue {
+  phase: SuiviPhase;
+  action: 'CUT' | 'RESTORE';
+  titre: string;
+  message: string;
+  etapes: ReadonlyArray<{ libelle: string; etat: 'fait' | 'en-cours' | 'attente' | 'erreur' }>;
+  /** Issue connue (succès, échec, sans preuve) : la fenêtre n'attend plus rien. */
+  terminal: boolean;
+  /** Le suivi dure : on laisse sortir, la commande continue d'être suivie par l'écran. */
+  peutMasquer: boolean;
+  /** Une coupure sans preuve : l'utilisateur peut demander la synchronisation manuelle du boîtier. */
+  peutSynchroniser: boolean;
+  /** La question « Synchroniser le boîtier ? » est posée (elle remplace le suivi). */
+  question: boolean;
+  synchroEnCours: boolean;
+  synchroErreur: string | null;
+}
 
 @Component({
   selector: 'app-engine-control-button',
@@ -133,6 +175,12 @@ const PENDING_ORPHELINE_MS = 120_000;
       <!-- Coupure partie sans preuve (06 et 07/10/2026) : la sortie est dite, en clair. -->
       @if (aideCoupureNonConfirmee(); as aide) {
         <p class="ec-refus ec-aide">{{ aide }}</p>
+        <!-- Le bandeau rouge (ci-dessous) porte déjà ce bouton quand il est affiché. -->
+        @if (peutSynchroniserEcran() && !(nonConfirmee() && !verifieSurPlace())) {
+          <button type="button" class="ec-sortie" (click)="ouvrirSynchro()" [disabled]="commandLocked()">
+            Synchroniser le boîtier
+          </button>
+        }
       }
 
       <!--
@@ -143,7 +191,7 @@ const PENDING_ORPHELINE_MS = 120_000;
         <div class="ec-muet">
           <div class="ec-muet-t">Boîtier muet depuis {{ d.silence }} — l'envoi n'est pas garanti</div>
           <ol class="ec-etapes">
-            <li><span class="ec-num">1</span> Envoyez quand même : le serveur tente le repli SMS.</li>
+            <li><span class="ec-num">1</span> Envoyez quand même : le serveur tente un canal de secours.</li>
             <li><span class="ec-num">2</span> Attendez la confirmation du boîtier — {{ fenetreSecondes }} s.</li>
             <li><span class="ec-num">3</span> Sans confirmation, <strong>vérifiez le véhicule sur place</strong> : rien ne prouve la coupure.</li>
           </ol>
@@ -167,6 +215,13 @@ const PENDING_ORPHELINE_MS = 120_000;
             <button type="button" class="ec-sortie" (click)="renvoyer()" [disabled]="commandLocked()">
               {{ commandLocked() ? 'Envoi…' : 'Renvoyer la commande' }}
             </button>
+            <!-- Véhicule peut-être hors de portée du GPS : l'état affiché n'est pas fiable. Offert pour une
+                 coupure seulement, une fois par commande (décision du 29/10/2026 : jamais automatique). -->
+            @if (peutSynchroniserEcran()) {
+              <button type="button" class="ec-sortie" (click)="ouvrirSynchro()" [disabled]="commandLocked()">
+                Synchroniser le boîtier
+              </button>
+            }
             <!-- L'onglet Agenda est désormais l'onglet par défaut de la page : ce lien demande Moteurs.
                  Seulement pour les rôles que la route admet (voitHistorique) : ailleurs, un lien mort. -->
             @if (voitHistorique()) {
@@ -284,6 +339,78 @@ const PENDING_ORPHELINE_MS = 120_000;
           </div>
         }
       </app-confirm-modal>
+
+      <!--
+        LA FENÊTRE D'ATTENTE — elle s'ouvre à l'instant du geste (avant même la réponse HTTP), couvre
+        l'écran et ne se referme qu'à l'issue de la commande : plus rien à cliquer pendant que
+        l'ordre est en route. Rendue par le SEUL bouton qui a lancé la commande.
+      -->
+      @if (suiviVue(); as v) {
+        <div #voileSuivi class="ec-suivi-voile" (click)="$event.stopPropagation()">
+          <div
+            class="ec-suivi"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="ec-suivi-titre"
+            aria-describedby="ec-suivi-msg"
+            [class.ec-suivi--ok]="v.phase === 'ok'"
+            [class.ec-suivi--alerte]="v.phase === 'echec' || v.phase === 'sans-preuve'"
+          >
+            <span class="ec-suivi-icone" aria-hidden="true">
+              @switch (v.phase) {
+                @case ('ok') { <lucide-icon [img]="CircleCheck" [size]="30"></lucide-icon> }
+                @case ('echec') { <lucide-icon [img]="TriangleAlert" [size]="30"></lucide-icon> }
+                @case ('sans-preuve') { <lucide-icon [img]="TriangleAlert" [size]="30"></lucide-icon> }
+                @default { <lucide-icon [img]="LoaderCircle" [size]="30" class="ec-suivi-tourne"></lucide-icon> }
+              }
+            </span>
+            <h2 id="ec-suivi-titre" class="ec-suivi-titre">{{ v.titre }}</h2>
+            <p class="ec-suivi-plaque">{{ vehiclePlate() }}</p>
+
+            @if (v.question) {
+              <!--
+                LA QUESTION. Elle dit POURQUOI (véhicule hors de portée du GPS) sans nommer le canal : c'est
+                une « synchronisation manuelle ». Elle coûte un message — d'où la confirmation explicite.
+              -->
+              <p id="ec-suivi-msg" class="ec-suivi-msg" aria-live="polite">
+                Le véhicule se trouve peut-être dans un souterrain ou dans une zone non couverte par le GPS :
+                l’état affiché n’est peut-être pas à jour. Une synchronisation manuelle peut remettre le boîtier
+                en ordre.
+              </p>
+              @if (v.synchroErreur) {
+                <p class="ec-suivi-erreur" role="alert">{{ v.synchroErreur }}</p>
+              }
+              <button type="button" class="ec-suivi-btn" (click)="confirmerSynchro()" [disabled]="v.synchroEnCours">
+                {{ v.synchroEnCours ? 'Synchronisation…' : 'Synchroniser le boîtier' }}
+              </button>
+              <button type="button" class="ec-suivi-lien" (click)="annulerSynchro()" [disabled]="v.synchroEnCours">
+                Annuler
+              </button>
+            } @else {
+              <ol class="ec-suivi-etapes">
+                @for (e of v.etapes; track e.libelle) {
+                  <li [class]="'ec-suivi-etape ec-suivi-etape--' + e.etat">
+                    <span class="ec-suivi-etape-pastille" aria-hidden="true"></span>{{ e.libelle }}
+                  </li>
+                }
+              </ol>
+
+              <p id="ec-suivi-msg" class="ec-suivi-msg" aria-live="polite">{{ v.message }}</p>
+
+              @if (v.peutSynchroniser) {
+                <button type="button" class="ec-suivi-sync" (click)="demanderSynchro()">Synchroniser le boîtier</button>
+              }
+              @if (v.terminal) {
+                <button type="button" class="ec-suivi-btn" (click)="fermerSuivi()">Fermer</button>
+              } @else if (v.peutMasquer) {
+                <button type="button" class="ec-suivi-lien" (click)="fermerSuivi()">
+                  Masquer — la commande continue
+                </button>
+              }
+            }
+          </div>
+        </div>
+      }
     </div>
   `,
   styles: [
@@ -376,6 +503,56 @@ const PENDING_ORPHELINE_MS = 120_000;
     }
     .ec-demo-t { font-size: 11.5px; font-weight: 800; color: var(--texte-succes); text-wrap: pretty; }
     .ec-demo-p { margin: 4px 0 0; font-size: 11px; line-height: 1.4; color: var(--fg-secondary); text-wrap: pretty; }
+
+    /* ── La fenêtre d'attente de commande ───────────────────────────────────────────────────
+       Elle BLOQUE (voile plein écran, y compris les autres boutons de la page) : c'est son but.
+       Sous le consentement (4000), au-dessus de la proposition 2FA (3800). */
+    .ec-suivi-voile {
+      position: fixed; inset: 0; z-index: 3900; display: flex; align-items: center; justify-content: center;
+      padding: 16px; background: color-mix(in srgb, var(--bg-primary) 62%, transparent);
+      backdrop-filter: blur(3px); cursor: progress;
+    }
+    .ec-suivi {
+      width: 100%; max-width: 380px; padding: 24px 22px 18px; text-align: center; cursor: default;
+      background: var(--bg-secondary); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-card, 18px);
+    }
+    .ec-suivi-icone { display: inline-flex; color: var(--texte-attente); }
+    .ec-suivi--ok .ec-suivi-icone { color: var(--texte-succes); }
+    .ec-suivi--alerte .ec-suivi-icone { color: var(--texte-alerte); }
+    .ec-suivi-tourne { animation: ec-suivi-tour 1.1s linear infinite; }
+    @keyframes ec-suivi-tour { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .ec-suivi-tourne { animation: ec-pulse 1.6s ease-in-out infinite; } }
+    .ec-suivi-titre { margin: 10px 0 2px; font-size: 1.15rem; font-weight: 800; letter-spacing: -.01em; color: var(--fg-primary); }
+    .ec-suivi-plaque { margin: 0 0 14px; font-size: .8rem; font-weight: 700; letter-spacing: .06em; color: var(--fg-secondary); }
+    .ec-suivi-etapes { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 7px; text-align: left; }
+    .ec-suivi-etape { display: flex; align-items: center; gap: 9px; font-size: .86rem; color: var(--fg-secondary); }
+    .ec-suivi-etape-pastille { width: 9px; height: 9px; border-radius: 9999px; flex: none; background: var(--border-strong); }
+    .ec-suivi-etape--fait { color: var(--fg-primary); }
+    .ec-suivi-etape--fait .ec-suivi-etape-pastille { background: var(--color-tracky-light); }
+    .ec-suivi-etape--en-cours { color: var(--fg-primary); font-weight: 700; }
+    .ec-suivi-etape--en-cours .ec-suivi-etape-pastille { background: var(--warning); animation: ec-pulse 1.2s ease-in-out infinite; }
+    .ec-suivi-etape--erreur { color: var(--texte-alerte); font-weight: 700; }
+    .ec-suivi-etape--erreur .ec-suivi-etape-pastille { background: var(--danger); }
+    @media (prefers-reduced-motion: reduce) { .ec-suivi-etape--en-cours .ec-suivi-etape-pastille { animation: none; } }
+    .ec-suivi-msg { margin: 0 0 14px; font-size: .86rem; line-height: 1.5; color: var(--fg-secondary); text-wrap: pretty; }
+    .ec-suivi-btn {
+      width: 100%; min-height: 46px; font: inherit; font-weight: 700; font-size: .95rem; cursor: pointer; border: 0;
+      border-radius: 12px; background: var(--color-tracky-light); color: var(--accent-ink);
+    }
+    .ec-suivi-lien {
+      display: flex; align-items: center; justify-content: center; width: 100%; min-height: 44px;
+      font: inherit; font-size: .82rem; font-weight: 600; background: none; border: 0; cursor: pointer;
+      color: var(--fg-secondary); border-radius: 10px;
+    }
+    .ec-suivi-lien:hover { color: var(--fg-primary); text-decoration: underline; }
+    .ec-suivi-sync {
+      width: 100%; min-height: 44px; margin: 0 0 8px; font: inherit; font-size: .9rem; font-weight: 700; cursor: pointer;
+      border-radius: 12px; background: transparent; color: var(--fg-primary); border: 1px solid var(--border-strong);
+    }
+    .ec-suivi-sync:hover { background: var(--bg-tertiary); }
+    .ec-suivi-erreur { margin: 0 0 12px; font-size: .84rem; line-height: 1.45; color: var(--texte-alerte); font-weight: 600; text-wrap: pretty; }
+    .ec-suivi-btn:disabled, .ec-suivi-lien:disabled { opacity: .6; cursor: wait; }
     `,
   ],
 })
@@ -419,6 +596,9 @@ export class EngineControlButtonComponent implements OnInit {
 
   protected readonly Power = Power;
   protected readonly PowerOff = PowerOff;
+  protected readonly CircleCheck = CircleCheck;
+  protected readonly LoaderCircle = LoaderCircle;
+  protected readonly TriangleAlert = TriangleAlert;
 
   private readonly authService = inject(AuthService);
   private readonly engineControl = inject(EngineControlService);
@@ -546,6 +726,312 @@ export class EngineControlButtonComponent implements OnInit {
     };
     armer(5000);
     inject(DestroyRef).onDestroy(() => { if (id) clearInterval(id); });
+    // Un bouton détruit (navigation) en pleine attente ne doit ni laisser tourner ses minuteurs ni garder le boîtier verrouillé.
+    inject(DestroyRef).onDestroy(() => {
+      this.fermerSuivi();
+      // ⚠️ Le voile a été déplacé à la racine du document : Angular, qui ne retire à la destruction d'un
+      // composant que son élément hôte, ne l'emporterait PAS — la fenêtre resterait affichée par-dessus
+      // l'application après un changement de page (trouvé par les tests, 29/10).
+      this.voileRef()?.nativeElement.remove();
+    });
+  }
+
+  /**
+   * ══ LA FENÊTRE D'ATTENTE — l'état de la commande que CE bouton vient d'envoyer ═════════════
+   *
+   * `commandId` reste nul entre le geste et la réponse HTTP : la fenêtre est déjà là (« Envoi de
+   * l'ordre… »), c'est tout son intérêt. Le verrou du boîtier (`EngineCommandLockService`) est tenu
+   * tant qu'elle est ouverte : aucune autre surface — carte, liste, fiche — ne peut renvoyer un ordre.
+   */
+  protected readonly suivi = signal<{
+    action: 'CUT' | 'RESTORE';
+    commandId: string | null;
+    depuis: number;
+    /** Fenêtre ouverte POUR la question (depuis l'écran du véhicule) : « Annuler » la referme au lieu de montrer un suivi. */
+    pourSynchro?: boolean;
+    /** Le boîtier VERROUILLÉ par cette fenêtre : c'est lui qu'on relâche, pas celui que l'entrée désigne à l'instant. */
+    trackerId: string;
+    /** Propriétaire de la fenêtre : une fin d'`onConfirm` tardive ne ferme ni ne relâche celle d'un autre geste. */
+    jeton: number;
+  } | null>(null);
+  private jetonSuivi = 0;
+  private suiviRelecture: ReturnType<typeof setInterval> | null = null;
+  private suiviFermetureAuto: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * ══ SYNCHRONISATION MANUELLE (29/10/2026) — décision du propriétaire ═══════════════════════
+   *
+   * Aucun envoi de secours automatique : il coûte, et le cas est rare. Quand une coupure reste sans
+   * preuve (véhicule en souterrain, zone non couverte par le GPS), l'utilisateur qui insiste se voit
+   * poser la question ; s'il confirme, le serveur renvoie le même ordre par un canal de secours et la
+   * réponse du boîtier remet l'écran d'accord. L'écran dit « synchronisation » — jamais le canal.
+   */
+  protected readonly suiviQuestion = signal(false);
+  protected readonly synchroEnCours = signal(false);
+  protected readonly synchroErreur = signal<string | null>(null);
+  /** Les commandes pour lesquelles une synchronisation a déjà été demandée (une seule par commande). */
+  private readonly synchroDemandee = signal<ReadonlySet<string>>(new Set());
+
+  /** Une coupure encore ouverte, jamais confirmée, ni remplacée, ni déjà synchronisée. */
+  private synchronisable(c: EngineControlCommandDto): boolean {
+    if (c.action !== 'CUT') return false;
+    if (c.status !== 'SENT' && c.status !== 'SENT_UNCONFIRMED') return false;
+    if (c.channel === 'SMS') return false;
+    if (c.lastError?.includes('supplantée')) return false;
+    return !this.synchroDemandee().has(c.id);
+  }
+
+  /**
+   * Sur l'écran du véhicule (hors fenêtre d'attente) : la même offre, là où l'utilisateur lit « coupure
+   * non confirmée » — liste servie « non confirmée », ou « en vol » depuis plus de 15 s. Seulement pour qui
+   * peut rallumer (même droit `engine_control`).
+   *
+   * ⚠️ Elle ne dépend PAS du bandeau rouge `nonConfirmee` : celui-ci n'existe que pour une coupure dont
+   * l'ignition était attendue. MH-971-TD était à l'arrêt (`confirmationExpected` faux) — exactement le cas
+   * qu'il fallait servir.
+   */
+  protected readonly peutSynchroniserEcran = computed<boolean>(() => {
+    const c = this.lastAppCommand();
+    if (!c || !this.synchronisable(c) || !this.canRestore()) return false;
+    const etat = this.etatDepuisListe();
+    if (etat === 'non-confirmee') return true;
+    const age = this._now() - new Date(c.sentAt ?? c.createdAt).getTime();
+    return etat === 'en-vol' && age >= SUIVI_ATTENTE_LONGUE_MS;
+  });
+
+  /** La commande suivie, lue dans la liste ou, à défaut, dans le dernier événement temps réel. */
+  private commandeSuivie(commandId: string | null): EngineControlCommandDto | null {
+    if (!commandId) return null;
+    const deListe = this.recentCommands().find((c) => c.id === commandId);
+    if (deListe) return deListe;
+    const ev = this.realtime.engineCommandUpdates().get(this.trackerId());
+    if (!ev || ev.commandId !== commandId) return null;
+    return {
+      id: ev.commandId,
+      trackerId: ev.trackerId,
+      action: ev.action,
+      status: ev.status,
+      reason: null,
+      source: ev.source ?? 'MANUAL',
+      lastError: ev.lastError,
+      requestedBy: '',
+      createdAt: ev.sentAt ?? '',
+      sentAt: ev.sentAt ?? null,
+      confirmationExpected: ev.confirmationExpected ?? false,
+      ackedAt: ev.ackedAt ?? null,
+      channel: ev.channel ?? null,
+    };
+  }
+
+  protected readonly suiviVue = computed<SuiviVue | null>(() => {
+    const s = this.suivi();
+    if (!s) return null;
+    const ecoule = this._now() - s.depuis;
+    const cmd = this.commandeSuivie(s.commandId);
+    const coupe = s.action === 'CUT';
+    // Une commande REMPLACÉE par une demande plus récente (y compris une remise en route constatée par SMS) :
+    // « non confirmée — peut-être déjà coupé » serait faux, c'est l'autre demande qui fait foi.
+    const remplacee = !!cmd?.lastError && cmd.lastError.includes('supplantée');
+    const muet = this.dormantWarning();
+
+    let phase: SuiviPhase;
+    // Une synchronisation demandée (ou une commande déjà repartie par le canal de secours) est EN COURS tant
+    // que la fenêtre n'a pas expiré — y compris pour une coupure échue (SENT_UNCONFIRMED) : lui répondre
+    // « non confirmée, vérifiez sur place » à l'instant même où l'utilisateur vient de la synchroniser
+    // l'inviterait à renvoyer la commande (relecture du 29/10).
+    const synchronisee =
+      !!cmd &&
+      (cmd.channel === 'SMS' || this.synchroDemandee().has(cmd.id)) &&
+      (cmd.status === 'SENT' || cmd.status === 'SENT_UNCONFIRMED') &&
+      !remplacee &&
+      ecoule < SUIVI_MAX_MS;
+    if (cmd?.status === 'ACKNOWLEDGED') phase = 'ok';
+    else if (cmd?.status === 'FAILED') phase = 'echec';
+    else if (synchronisee) phase = 'sms';
+    else if (remplacee || cmd?.status === 'SENT_UNCONFIRMED' || ecoule >= SUIVI_MAX_MS) phase = 'sans-preuve';
+    else if (!cmd || cmd.status === 'PENDING') phase = 'envoi';
+    else if (cmd.channel === 'SMS') phase = 'sms';
+    else if (ecoule >= SUIVI_ATTENTE_LONGUE_MS) phase = 'attente-longue';
+    else phase = 'attente';
+
+    const titres: Record<SuiviPhase, string> = {
+      envoi: coupe ? 'Coupure du moteur en cours' : 'Rallumage du moteur en cours',
+      attente: coupe ? 'Coupure du moteur en cours' : 'Rallumage du moteur en cours',
+      'attente-longue': coupe ? 'Coupure du moteur en cours' : 'Rallumage du moteur en cours',
+      sms: coupe ? 'Coupure du moteur en cours' : 'Rallumage du moteur en cours',
+      ok: coupe ? 'Moteur coupé' : 'Moteur rallumé',
+      echec: coupe ? 'Coupure échouée' : 'Rallumage échoué',
+      'sans-preuve': coupe ? 'Coupure non confirmée' : 'Rallumage non confirmé',
+    };
+    const messages: Record<SuiviPhase, string> = {
+      envoi: 'Envoi de l’ordre… Ne touchez à rien.',
+      attente: 'Le boîtier répond en général en quelques secondes. Ne touchez à rien.',
+      'attente-longue': 'Le boîtier tarde à répondre : le véhicule est peut-être hors de portée (souterrain, zone non couverte). Ne touchez à rien.',
+      sms: 'Synchronisation avec le boîtier en cours : sa réponse peut prendre jusqu’à une minute.',
+      ok: 'Le boîtier a confirmé.',
+      echec:
+        cmd?.lastError && !/sms/i.test(cmd.lastError)
+          ? cmd.lastError
+          : 'La commande n’a pas pu être envoyée au boîtier : il est peut-être hors de portée. Vérifiez le véhicule sur place.',
+      'sans-preuve':
+        `Le boîtier n’a pas confirmé. Le véhicule est peut-être déjà ${coupe ? 'coupé' : 'rallumé'} : ` +
+        'vérifiez sur place avant de recommencer.',
+    };
+
+    // Boîtier muet : rien ne reviendra confirmer — le dire, au lieu de promettre une réponse « en quelques secondes ».
+    if (muet && (phase === 'attente' || phase === 'attente-longue' || phase === 'sms')) {
+      messages[phase] = `Boîtier muet depuis ${muet.silence} : aucune confirmation n’est attendue. Vérifiez le véhicule sur place.`;
+    }
+    if (remplacee) {
+      titres['sans-preuve'] = 'Commande remplacée';
+      messages['sans-preuve'] = 'Une demande plus récente a pris le relais de celle-ci : l’écran affiche l’état à jour.';
+    }
+    const enAttenteDeReponse = phase === 'envoi' || phase === 'attente' || phase === 'attente-longue' || phase === 'sms';
+    const confirmation: 'fait' | 'en-cours' | 'attente' | 'erreur' =
+      phase === 'ok' ? 'fait' : phase === 'echec' || phase === 'sans-preuve' ? 'erreur' : phase === 'envoi' ? 'attente' : 'en-cours';
+    const etapes: SuiviVue['etapes'] = [
+      { libelle: 'Ordre enregistré', etat: s.commandId ? 'fait' : 'en-cours' },
+      {
+        libelle: 'Envoyé au boîtier',
+        etat: !s.commandId ? 'attente' : cmd && cmd.status !== 'PENDING' ? 'fait' : 'en-cours',
+      },
+      {
+        libelle: phase === 'sms' ? 'Confirmation du boîtier (synchronisation)' : 'Confirmation du boîtier',
+        etat: confirmation,
+      },
+    ];
+    const question = this.suiviQuestion();
+    return {
+      phase,
+      action: s.action,
+      titre: question ? 'Synchroniser le boîtier ?' : titres[phase],
+      message: messages[phase],
+      etapes,
+      terminal: !enAttenteDeReponse,
+      peutMasquer: enAttenteDeReponse && ecoule >= SUIVI_MASQUER_APRES_MS,
+      peutSynchroniser:
+        coupe && !!cmd && this.synchronisable(cmd) && (phase === 'attente-longue' || phase === 'sans-preuve'),
+      question,
+      synchroEnCours: this.synchroEnCours(),
+      synchroErreur: this.synchroErreur(),
+    };
+  });
+
+  /**
+   * Le voile vit à la RACINE du document, pas dans le bouton. Sur la carte, la fiche véhicule porte un
+   * `backdrop-filter` et une animation : un élément `position: fixed` placé dedans est confiné à cette
+   * feuille — le fond de carte restait cliquable, et un clic dehors détruisait le bouton en pleine
+   * commande (relecture du 29/10). Déplacer le nœud est sans risque pour Angular : il retire un nœud par
+   * son parent RÉEL.
+   */
+  private readonly voileRef = viewChild<ElementRef<HTMLElement>>('voileSuivi');
+  private readonly voileHorsCarte = effect(() => {
+    const el = this.voileRef()?.nativeElement;
+    if (el && el.parentElement !== document.body) document.body.appendChild(el);
+  });
+
+  /** Succès : la fenêtre se referme seule, le temps de lire « Moteur coupé ». */
+  private readonly suiviAutoFermeture = effect(() => {
+    const vue = this.suiviVue();
+    if (vue?.phase === 'ok' && !this.suiviFermetureAuto && !this.synchroEnCours()) {
+      this.suiviFermetureAuto = setTimeout(() => this.fermerSuivi(), SUIVI_FERMETURE_OK_MS);
+    }
+  });
+
+  private ouvrirSuivi(action: 'CUT' | 'RESTORE'): number {
+    this.arreterMinuteursSuivi();
+    this._now.set(Date.now());
+    const jeton = (this.jetonSuivi += 1);
+    this.suiviQuestion.set(false);
+    this.synchroErreur.set(null);
+    this.suivi.set({ action, commandId: null, depuis: Date.now(), trackerId: this.trackerId(), jeton });
+    // Relecture régulière : le suivi ne doit pas dépendre du WebSocket (coupé pendant une bascule d'API
+    // — c'est justement quand on envoie une commande qu'on veut qu'il tienne).
+    this.suiviRelecture = setInterval(() => {
+      this._now.set(Date.now());
+      if (this.suivi()?.commandId) void this.loadRecentCommands(0);
+    }, SUIVI_RELECTURE_MS);
+    return jeton;
+  }
+
+  private arreterMinuteursSuivi(): void {
+    if (this.suiviRelecture) clearInterval(this.suiviRelecture);
+    if (this.suiviFermetureAuto) clearTimeout(this.suiviFermetureAuto);
+    this.suiviRelecture = null;
+    this.suiviFermetureAuto = null;
+  }
+
+  /** Ferme la fenêtre et rend la main : le verrou du boîtier est relâché, les boutons disent à nouveau le vrai. */
+  protected fermerSuivi(): void {
+    const s = this.suivi();
+    this.arreterMinuteursSuivi();
+    this.suivi.set(null);
+    this.suiviQuestion.set(false);
+    this.synchroErreur.set(null);
+    this.synchroEnCours.set(false);
+    if (s) this.commandLocks.release(s.trackerId);
+  }
+
+  /** Ouvre la question depuis la fenêtre d'attente. */
+  protected demanderSynchro(): void {
+    this.synchroErreur.set(null);
+    this.suiviQuestion.set(true);
+  }
+
+  protected annulerSynchro(): void {
+    if (this.synchroEnCours()) return;
+    this.suiviQuestion.set(false);
+    if (this.suivi()?.pourSynchro) this.fermerSuivi();
+  }
+
+  /**
+   * Depuis le bandeau « le boîtier n'a pas confirmé » : la question s'ouvre dans la fenêtre, qui prend le
+   * verrou — le boîtier ne reçoit pas un ordre pendant qu'on le synchronise.
+   */
+  protected ouvrirSynchro(): void {
+    const c = this.lastAppCommand();
+    if (!c || !this.synchronisable(c)) return;
+    const trackerId = this.trackerId();
+    if (this.commandLocked() || !this.commandLocks.acquire(trackerId)) {
+      this.toast.info(
+        'Commande déjà en cours',
+        `Un envoi est en cours sur ${this.vehiclePlate()} — attendez sa réponse avant d’en lancer un autre.`,
+      );
+      return;
+    }
+    this.ouvrirSuivi('CUT');
+    // L'horloge est celle de la COMMANDE (partie il y a plusieurs minutes), pas celle de l'ouverture : sinon
+    // la fenêtre ressemblerait à un envoi neuf (« répond en quelques secondes », sans « Masquer » pendant 10 s).
+    const depuis = new Date(c.sentAt ?? c.createdAt).getTime();
+    this.suivi.update((x) => (x ? { ...x, commandId: c.id, depuis: Number.isFinite(depuis) ? depuis : x.depuis, pourSynchro: true } : x));
+    this.suiviQuestion.set(true);
+  }
+
+  protected async confirmerSynchro(): Promise<void> {
+    const s = this.suivi();
+    const cmd = s ? this.commandeSuivie(s.commandId) : null;
+    if (!s || !cmd || this.synchroEnCours()) return;
+    // La situation a pu changer entre la question et la confirmation (écho reçu, rallumage…).
+    if (!this.synchronisable(cmd)) {
+      this.synchroErreur.set('La situation de ce véhicule a changé : fermez cette fenêtre, l’écran est à jour.');
+      return;
+    }
+    this.synchroEnCours.set(true);
+    this.synchroErreur.set(null);
+    try {
+      await firstValueFrom(this.engineControl.synchroniser(s.trackerId, cmd.id));
+      this.synchroDemandee.update((set) => new Set(set).add(cmd.id));
+      this.suiviQuestion.set(false);
+      // Le suivi repart : 150 s pour que le boîtier réponde à la synchronisation.
+      this.suivi.update((x) => (x && x.jeton === s.jeton ? { ...x, depuis: Date.now() } : x));
+      await this.loadRecentCommands(0);
+    } catch (err) {
+      swallow('engine-control-button:confirmerSynchro', err);
+      // Le message vient de l'API, qui ne nomme jamais le canal : on l'affiche tel quel.
+      this.synchroErreur.set(this.extractErrorMessage(err));
+    } finally {
+      this.synchroEnCours.set(false);
+    }
   }
 
   /** Une commande attend-elle encore sa confirmation ? Pilote la cadence du tick. */
@@ -637,7 +1123,7 @@ export class EngineControlButtonComponent implements OnInit {
         short: late ? 'Rallumage non confirmé' : 'Rallumage en cours',
         label: late
           ? 'Le rallumage n’est toujours pas confirmé. Vérifiez l’alerte et le véhicule.'
-          : 'RESTORE enregistré : TCP puis secours SMS seront suivis jusqu’au statut final.',
+          : 'RESTORE enregistré : l’envoi et son secours seront suivis jusqu’au statut final.',
         textClass: late ? 'ec-alerte' : 'ec-attente',
         dotClass: late ? 'ec-point-alerte' : 'ec-point-attente',
       };
@@ -755,7 +1241,7 @@ export class EngineControlButtonComponent implements OnInit {
       silence,
       title:
         `Le boîtier n'a plus émis depuis ${silence} (batterie débranchée, SIM coupée ou boîtier déposé). ` +
-        `La commande sera tout de même tentée, par SMS : ne considérez l'action faite qu'une fois ` +
+        `La commande sera tout de même tentée, par un canal de secours : ne considérez l'action faite qu'une fois ` +
         `confirmée par le boîtier, ou vérifiée physiquement.`,
     };
   });
@@ -926,7 +1412,7 @@ export class EngineControlButtonComponent implements OnInit {
     if (!d) return '';
     return (
       `<br><br><span class="text-amber-400 text-xs">Attention : le boîtier n'a plus émis depuis ` +
-      `<strong>${d.silence}</strong>. La commande sera tentée (repli SMS) mais aucune confirmation ` +
+      `<strong>${d.silence}</strong>. La commande sera tentée (canal de secours) mais aucune confirmation ` +
       `n'est à attendre — à vérifier physiquement.</span>`
     );
   });
@@ -1067,6 +1553,9 @@ export class EngineControlButtonComponent implements OnInit {
       return;
     }
     this.loading.set(true);
+    // La fenêtre d'attente s'ouvre AVANT le réseau : dès le geste, l'écran dit « Envoi de l'ordre… »
+    // et plus rien ne se clique. Elle tient le verrou jusqu'à l'issue de la commande.
+    const jeton = this.ouvrirSuivi(action);
     const reasonText = action === 'CUT' ? this.reason() || undefined : undefined;
     // « Immobilisation durable » (case optionnelle, CUT uniquement) → désactive le planning (sortie
     // du mode horaire, cas anti-vol). Sinon l'action suspend juste le planning jusqu'à la prochaine
@@ -1083,6 +1572,9 @@ export class EngineControlButtonComponent implements OnInit {
       const cmd = await firstValueFrom(
         this.engineControl.requestCommand(this.trackerId(), action, reasonText, durable || undefined),
       );
+      // La fenêtre suit désormais CETTE commande (celle que le serveur rend : neuve, ou une intention
+      // antérieure déjà en vol — cf. P0-1 ci-dessous).
+      this.suivi.update((s) => (s && s.jeton === jeton ? { ...s, commandId: cmd.id } : s));
       if (durable) {
         this._scheduleEnabled.set(false);
         this.scheduleDisabled.emit();
@@ -1108,7 +1600,7 @@ export class EngineControlButtonComponent implements OnInit {
           message:
             action === 'CUT'
               ? `Commande ${cmd.id.slice(0, 8)} créée à ${depuis} — toujours en attente de confirmation du boîtier.`
-              : `Commande ${cmd.id.slice(0, 8)} créée à ${depuis} — réarmée à l’instant : TCP d’abord, puis secours SMS, surveillée jusqu’à confirmation.`,
+              : `Commande ${cmd.id.slice(0, 8)} créée à ${depuis} — réarmée à l’instant : envoi direct d’abord, puis secours, surveillée jusqu’à confirmation.`,
           duration: 9000,
         });
         await this.loadRecentCommands();
@@ -1128,21 +1620,22 @@ export class EngineControlButtonComponent implements OnInit {
           // Deux phrases à lire : le défaut de 4 s ne suffit pas.
           duration: 9000,
         });
-      } else {
+      } else if (dormant) {
+        // Le suivi est dans la fenêtre d'attente ; seul le boîtier MUET garde un toast : rien ne
+        // reviendra confirmer son geste, et la fenêtre ne doit pas laisser croire le contraire.
         this.toast.show({
           kind: 'info',
           title: action === 'CUT' ? 'Coupure en cours' : 'Rallumage en cours',
-          message: dormant
-            ? `Commande ${cmd.id.slice(0, 8)} — boîtier muet depuis ${dormant.silence} : vérification physique requise.`
-            : action === 'CUT'
-              ? `Commande ${cmd.id.slice(0, 8)} — en attente de confirmation du boîtier…`
-              : `Commande ${cmd.id.slice(0, 8)} enregistrée — elle reste surveillée jusqu’à confirmation.`,
+          message: `Commande ${cmd.id.slice(0, 8)} — boîtier muet depuis ${dormant.silence} : vérification physique requise.`,
           duration: 8000,
         });
       }
       await this.loadRecentCommands();
     } catch (err) {
       swallow('engine-control-button:onConfirm', err);
+      // Refusée ou en échec avant d'avoir une commande à suivre : la fenêtre s'efface, le toast parle.
+      // Seulement SI elle est encore la nôtre : « Masquer » a pu la fermer, et une autre surface tenir le verrou.
+      if (this.suivi()?.jeton === jeton) this.fermerSuivi();
       if (err instanceof HttpErrorResponse && err.status === 409) {
         this.toast.error(
           'Commande déjà en cours',
@@ -1156,7 +1649,8 @@ export class EngineControlButtonComponent implements OnInit {
       }
     } finally {
       this.loading.set(false);
-      this.commandLocks.release(trackerId);
+      // Le verrou n'est JAMAIS relâché ici : la fenêtre d'attente le tient, et seul `fermerSuivi` le rend
+      // (relecture du 29/10 : relâcher ici, après un « Masquer », libérait le verrou d'une autre surface).
     }
   }
 

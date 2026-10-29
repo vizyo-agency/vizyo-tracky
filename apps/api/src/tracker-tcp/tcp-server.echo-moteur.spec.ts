@@ -26,6 +26,16 @@ const TRAME_LOGIN = `##,imei:${IMEI},A;`;
 const TRAME_JT = `imei:${IMEI},jt,261007210752,100%,F,210752.000,A,4340.01278,N,00126.40002,E,3.52,113.70,,0,0,0.00%,,;`;
 /** 07/10 07:22:54 — l'écho d'une remise en route. */
 const TRAME_KT = `imei:${IMEI},kt,261007052253,100%,F,052253.000,A,4340.01436,N,00126.39339,E,0.00,0.00,,0,0,0.00%,,;`;
+/**
+ * 29/10 06:45:07 (Paris) — l'écho de la coupure envoyée à 06:45:04, MH-971-TD hors GPS : drapeau `L`,
+ * aucune coordonnée → le décodeur la classe `no_fix`. 3 s après l'ordre, dans les 15 s du guetteur.
+ */
+/** La date du boîtier (aaMMjjHHmmss, UTC) : relative à l'horloge des tests, car l'écho n'est daté que s'il est récent. */
+const horodate = (d: Date): string => d.toISOString().slice(2, 19).replace(/[-T:]/g, '');
+const trameSansGps = (mot: 'jt' | 'kt' | 'tracker', d: Date = new Date()): string =>
+  `imei:${IMEI},${mot},${horodate(d)},100%,L,,,75af,,8231402,,,,,1,0,0.00%,,;`;
+const TRAME_JT_SANS_GPS = trameSansGps('jt');
+const TRAME_KT_SANS_GPS = trameSansGps('kt');
 /** Une position ordinaire du même boîtier, juste avant. */
 const TRAME_POSITION = `imei:${IMEI},tracker,261007210717,100%,F,210717.000,A,4340.01625,N,00126.39794,E,0.00,347.60,,1,0,0.00%,,;`;
 /** « acc off » se décode comme `jt` (même alarme) : ce n'est PAS un écho de commande. */
@@ -107,7 +117,7 @@ function monter(options: { avecEmetteur?: boolean } = {}) {
   const prive = service as unknown as SurfacePrivee;
   const socket = new FauxSocket();
   prive.handleConnection(socket as unknown as Socket);
-  return { prive, socket, registry, positions, ackWaiter, events, remplacer: (s: unknown) => (inscrite = s) };
+  return { prive, socket, registry, prisma, positions, ackWaiter, events, remplacer: (s: unknown) => (inscrite = s) };
 }
 
 type Contexte = ReturnType<typeof monter>;
@@ -192,6 +202,100 @@ describe('TcpServerService — écho moteur orphelin (06 et 07/10/2026)', () => 
 
     expect(c.ackWaiter.tryMatch).toHaveBeenCalledWith(IMEI, TRAME_JT.slice(0, -1));
     expect(c.events.emit).not.toHaveBeenCalled();
+  });
+
+  describe('🔴 boîtier SANS GPS : l’écho arrive en trame `no_fix` (MH-971-TD, 28 et 29/10/2026)', () => {
+    it('le guetteur d’accusé reçoit la trame — c’est ce qui manquait : « envoyée » restait « envoyée »', async () => {
+      c = monter();
+      c.ackWaiter.tryMatch.mockReturnValue(true);
+      await connecter(c);
+      c.socket.recevoir(TRAME_JT_SANS_GPS);
+      await laisserTraiter();
+
+      expect(c.ackWaiter.tryMatch).toHaveBeenCalledWith(IMEI, TRAME_JT_SANS_GPS.slice(0, -1));
+      // Pris par le guetteur : un seul chemin acquitte, rien n'est rediffusé.
+      expect(c.events.emit).not.toHaveBeenCalled();
+      // Et la trame reste ce qu'elle était : aucune position écrite, boîtier vu vivant sans GPS.
+      expect(c.positions.ingest).not.toHaveBeenCalled();
+    });
+
+    it('sans guetteur (écho tardif ou précoce), il est diffusé avec l’heure de la TRAME', async () => {
+      c = monter();
+      await connecter(c);
+      c.socket.recevoir(TRAME_JT_SANS_GPS);
+      await laisserTraiter();
+
+      expect(c.positions.ingest).not.toHaveBeenCalled();
+      expect(c.events.emit).toHaveBeenCalledTimes(1);
+      expect(c.events.emit).toHaveBeenCalledWith(
+        TRACKER_ENGINE_ECHO_EVENT,
+        expect.objectContaining({
+          imei: IMEI,
+          action: 'CUT',
+          raw: TRAME_JT_SANS_GPS.slice(0, -1),
+          // L'heure de la TRAME (celle du boîtier), à la seconde — pas l'heure de réception (`at`).
+          deviceTime: expect.stringMatching(/^20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.000Z$/),
+        }),
+      );
+    });
+
+    it('un `kt` sans GPS est diffusé comme une remise en route', async () => {
+      c = monter();
+      await connecter(c);
+      c.socket.recevoir(TRAME_KT_SANS_GPS);
+      await laisserTraiter();
+
+      expect(c.events.emit).toHaveBeenCalledWith(
+        TRACKER_ENGINE_ECHO_EVENT,
+        expect.objectContaining({ imei: IMEI, action: 'RESTORE' }),
+      );
+    });
+
+    it('la trame est rapprochée AVANT l’écriture en base : une base en panne ne perd pas l’accusé', async () => {
+      c = monter();
+      c.ackWaiter.tryMatch.mockReturnValue(true);
+      (c.prisma.tracker.update as jest.Mock).mockRejectedValue(new Error('base indisponible'));
+      await connecter(c);
+      c.socket.recevoir(TRAME_JT_SANS_GPS);
+      await laisserTraiter();
+
+      expect(c.ackWaiter.tryMatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('un écho reçu sur une session REMPLACÉE n’est pas diffusé, sans GPS non plus (C2)', async () => {
+      c = monter();
+      await connecter(c);
+      c.remplacer({ autre: 'socket' });
+      c.socket.recevoir(TRAME_JT_SANS_GPS);
+      await laisserTraiter();
+
+      expect(c.events.emit).not.toHaveBeenCalled();
+    });
+
+    it('🔴 une trame sans GPS ORDINAIRE (rapport LBS) n’est jamais proposée aux guetteurs — ils ne l’avalent pas (relecture 29/10)', async () => {
+      c = monter();
+      await connecter(c);
+      c.socket.recevoir(trameSansGps('tracker'));
+      await laisserTraiter();
+
+      // Un guetteur générique (`position_single`, motif `imei:…,`) l'aurait résolue : c'est nouveau
+      // pour ces trames, et inutile — seul un écho `jt`/`kt` est rapproché.
+      expect(c.ackWaiter.tryMatch).not.toHaveBeenCalled();
+      expect(c.events.emit).not.toHaveBeenCalled();
+    });
+
+    it('🔴 l’horloge d’un boîtier sans GPS est INTERNE : si elle s’écarte de plus de 2 min, l’écho est diffusé SANS heure (donc jamais rapproché)', async () => {
+      c = monter();
+      await connecter(c);
+      const reglageUtcPlusDeux = new Date(Date.now() + 2 * 3600_000);
+      c.socket.recevoir(trameSansGps('jt', reglageUtcPlusDeux));
+      await laisserTraiter();
+
+      expect(c.events.emit).toHaveBeenCalledWith(
+        TRACKER_ENGINE_ECHO_EVENT,
+        expect.objectContaining({ imei: IMEI, action: 'CUT', deviceTime: null }),
+      );
+    });
   });
 
   it('une position ordinaire ou un « acc off » ne diffuse rien', async () => {
