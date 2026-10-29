@@ -1411,6 +1411,267 @@ describe('EngineControlService', () => {
   });
 
   /**
+   * ══ ÉCHO MOTEUR HORS FENÊTRE (incident CDEF31, 06 et 07/10/2026) ════════════════════════════
+   *
+   * Le boîtier a répondu `jt` 157 s puis 69 s après la coupure — après l'abandon du guetteur
+   * (15 s). La commande est restée SENT, l'écran du veilleur l'a lue « moteur actif » et n'offrait
+   * plus « Rallumer ». Le serveur TCP diffuse désormais l'écho orphelin ; ces tests verrouillent
+   * le rapprochement ET ses abstentions — un écho collé à la mauvaise intention ferait croire à un
+   * état que le véhicule n'a pas.
+   */
+  describe('écho moteur hors fenêtre — `jt` / `kt` arrivés quand plus personne n’écoutait', () => {
+    const IMEI_ECHO = '860000000000733';
+    const RAW_JT = `imei:${IMEI_ECHO},jt,261007210752,100%,F,210752.000,A,4340.01278,N,00126.40002,E,3.52,113.70,,0,0,0.00%,,`;
+    const RAW_KT = RAW_JT.replace(',jt,', ',kt,');
+    /** Un écho DATÉ par le boîtier : par défaut, à l'instant (69 s après la commande de `derniere`). */
+    const echo = (action: 'CUT' | 'RESTORE', raw = RAW_JT, deviceTime: string | null = new Date().toISOString()) =>
+      ({ imei: IMEI_ECHO, action, raw, at: new Date().toISOString(), deviceTime }) as never;
+    /** Le `where` attendu : ouverte, ou échue — jamais supplantée par une remise en route. */
+    const WHERE_COUPE_RAPPROCHABLE = {
+      id: 'cmd-echo',
+      ackedAt: null,
+      OR: [
+        { status: { in: [CommandStatus.PENDING, CommandStatus.SENT] } },
+        { status: CommandStatus.SENT_UNCONFIRMED, lastError: null },
+        {
+          status: CommandStatus.SENT_UNCONFIRMED,
+          NOT: { lastError: { startsWith: 'CUT supplantée par une intention RESTORE plus récente' } },
+        },
+      ],
+    };
+    const boitier = () =>
+      prisma.tracker.findUnique.mockResolvedValue({
+        id: TRACKER_ID,
+        imei: IMEI_ECHO,
+        vehicle: { fleetId: FLEET_ID, plate: 'AB-123-CD' },
+      } as never);
+    /** La dernière intention de l'application, telle que la base la rend. */
+    const derniere = (overrides: Record<string, unknown>) =>
+      prisma.engineControlCommand.findFirst.mockResolvedValue(
+        createdCommand({
+          id: 'cmd-echo',
+          source: 'MANUAL',
+          createdAt: new Date(Date.now() - 69_000),
+          sentAt: new Date(Date.now() - 69_000),
+          ...overrides,
+        }) as never,
+      );
+    const wire = () => testModule.get(CobanWireLogger) as unknown as { ackMatch: jest.Mock };
+
+    it('🔴 07/10 23:07:54 — le `jt` tardif ACQUITTE la coupure restée SENT, et l’écran est prévenu', async () => {
+      // LE test du correctif : sur le code d'avant, cet écho n'atteignait jamais la commande.
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.SENT });
+      prisma.engineControlCommand.findUnique.mockResolvedValue(
+        createdCommand({ id: 'cmd-echo', status: CommandStatus.ACKNOWLEDGED, ackedAt: new Date() }) as never,
+      );
+
+      await service.onEchoMoteur(echo('CUT'));
+
+      expect(prisma.engineControlCommand.updateMany).toHaveBeenCalledWith({
+        where: WHERE_COUPE_RAPPROCHABLE,
+        data: expect.objectContaining({ status: CommandStatus.ACKNOWLEDGED, ackedAt: expect.any(Date), activeKey: null }),
+      });
+      expect(gateway.emitEngineCommandUpdate).toHaveBeenCalledWith(
+        FLEET_ID,
+        expect.objectContaining({ commandId: 'cmd-echo', status: CommandStatus.ACKNOWLEDGED }),
+      );
+      // La preuve garde sa vraie latence dans wire_logs (trame `ack`).
+      const [imei, raw, commandId, latenceMs] = wire().ackMatch.mock.calls[0];
+      expect([imei, raw, commandId]).toEqual([IMEI_ECHO, RAW_JT, 'cmd-echo']);
+      expect(latenceMs).toBeGreaterThanOrEqual(69_000);
+    });
+
+    it('une coupure ÉCHUE (SENT_UNCONFIRMED) est rapprochée aussi : « nul ne sait » cède devant une preuve', async () => {
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.SENT_UNCONFIRMED, source: 'SCHEDULER', activeKey: null });
+
+      await service.onEchoMoteur(echo('CUT'));
+
+      expect(prisma.engineControlCommand.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: CommandStatus.ACKNOWLEDGED }) }),
+      );
+    });
+
+    it('cherche la DERNIÈRE intention du boîtier : 24 h, sans refus, sans échec d’envoi, sans observation', async () => {
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.SENT });
+
+      await service.onEchoMoteur(echo('CUT'));
+
+      const requete = prisma.engineControlCommand.findFirst.mock.calls[0][0];
+      expect(requete.where).toMatchObject({
+        trackerId: TRACKER_ID,
+        source: { not: 'DEVICE_OBSERVED' },
+        status: { notIn: [CommandStatus.REJECTED_SPEED, CommandStatus.FAILED] },
+      });
+      const depuis = (requete.where.createdAt.gte as Date).getTime();
+      expect(Date.now() - depuis).toBeGreaterThanOrEqual(24 * 3600_000 - 1000);
+      expect(Date.now() - depuis).toBeLessThanOrEqual(24 * 3600_000 + 1000);
+      expect(requete.orderBy).toEqual({ createdAt: 'desc' });
+    });
+
+    it('🔴 un écho daté d’AVANT la commande est une trame rejouée : il n’acquitte RIEN', async () => {
+      // Relecture du 08/10 : les Coban revident leur tampon à la reconnexion. Un `jt` d'hier qui
+      // arrive maintenant ne dit rien de la coupure de ce soir — l'acquitter afficherait « Moteur
+      // coupé » sur un véhicule que rien ne prouve coupé.
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.SENT });
+      const hier = new Date(Date.now() - 24 * 3600_000).toISOString();
+
+      await service.onEchoMoteur(echo('CUT', RAW_JT, hier));
+
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+      expect(gateway.emitEngineCommandUpdate).not.toHaveBeenCalled();
+    });
+
+    it('un écho sans heure, ou daté du futur, ne prouve rien : aucune lecture, aucune écriture', async () => {
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.SENT });
+
+      await service.onEchoMoteur(echo('CUT', RAW_JT, null));
+      await service.onEchoMoteur(echo('CUT', RAW_JT, new Date(Date.now() + 3600_000).toISOString()));
+
+      expect(prisma.engineControlCommand.findFirst).not.toHaveBeenCalled();
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('l’écho précoce (TRK-083 : `jt` avant l’inscription du guetteur, commande encore PENDING) acquitte aussi', async () => {
+      // `writeSent`, conditionnel (T48), s'effacera ensuite devant l'acquittement.
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.PENDING, sentAt: null, createdAt: new Date(Date.now() - 400) });
+
+      await service.onEchoMoteur(echo('CUT'));
+
+      expect(prisma.engineControlCommand.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: WHERE_COUPE_RAPPROCHABLE }),
+      );
+    });
+
+    it('🔴 une coupure SUPPLANTÉE par une remise en route n’est jamais acquittée, même supplantée entre lecture et écriture', async () => {
+      // La condition voyage dans le `where` : si une RESTORE supplante la coupure après notre
+      // lecture, l'écriture ne trouve plus de ligne (count 0) au lieu d'acquitter une coupure
+      // abandonnée — la règle déjà appliquée au guetteur (« ACK tardif ignoré : supplantée »).
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.SENT });
+      prisma.engineControlCommand.updateMany.mockResolvedValue({ count: 0 } as never);
+
+      await service.onEchoMoteur(echo('CUT'));
+
+      const where = prisma.engineControlCommand.updateMany.mock.calls[0][0].where;
+      expect(where.OR).toContainEqual({
+        status: CommandStatus.SENT_UNCONFIRMED,
+        NOT: { lastError: { startsWith: 'CUT supplantée par une intention RESTORE plus récente' } },
+      });
+      expect(where).not.toHaveProperty('status');
+      expect(gateway.emitEngineCommandUpdate).not.toHaveBeenCalled();
+    });
+
+    it('un `kt` hors fenêtre ne touche PAS à la remise en route : elle a sa propre route (relance, secours SMS)', async () => {
+      // Ses écritures ne sont pas toutes conditionnelles (`retryTcpOnly`, échecs SMS) : un
+      // acquittement posé en parallèle pourrait y être écrasé (relecture du 08/10).
+      boitier();
+      derniere({ action: EngineAction.RESTORE, status: CommandStatus.SENT, nextAttemptAt: new Date() });
+
+      await service.onEchoMoteur(echo('RESTORE', RAW_KT));
+
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+      expect(errorLogger.record).not.toHaveBeenCalled();
+    });
+
+    it('second écho d’une commande déjà acquittée : rien n’est réécrit', async () => {
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.ACKNOWLEDGED, ackedAt: new Date() });
+
+      await service.onEchoMoteur(echo('CUT'));
+
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+      expect(gateway.emitEngineCommandUpdate).not.toHaveBeenCalled();
+    });
+
+    it('🔴 `jt` alors que la dernière demande est une remise en route EN COURS : on ne touche à RIEN', async () => {
+      // L'écho peut précéder de peu l'exécution de K : la RESTORE suit sa propre route.
+      boitier();
+      derniere({ action: EngineAction.RESTORE, status: CommandStatus.SENT });
+
+      await service.onEchoMoteur(echo('CUT'));
+
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+      expect(errorLogger.record).not.toHaveBeenCalled();
+    });
+
+    it('🔴 `jt` APRÈS une remise en route ACQUITTÉE : CRITICAL — véhicule immobilisé que tout le monde croit libre', async () => {
+      boitier();
+      derniere({ action: EngineAction.RESTORE, status: CommandStatus.ACKNOWLEDGED, ackedAt: new Date() });
+
+      await service.onEchoMoteur(echo('CUT'));
+
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+      expect(errorLogger.record).toHaveBeenCalledWith(
+        expect.stringContaining('signale une coupure (jt)'),
+        'engine-control',
+        expect.objectContaining({ commandId: 'cmd-echo', imei: IMEI_ECHO }),
+        'CRITICAL',
+      );
+      // Ni heure ni compteur dans le message : l'empreinte de déduplication reste stable (TRK-039).
+      expect(String(errorLogger.record.mock.calls[0][0])).not.toMatch(/\d{2}:\d{2}/);
+    });
+
+    it('un `jt` REJOUÉ (antérieur au rallumage acquitté) ne déclenche aucune alerte', async () => {
+      boitier();
+      derniere({ action: EngineAction.RESTORE, status: CommandStatus.ACKNOWLEDGED, ackedAt: new Date() });
+
+      await service.onEchoMoteur(echo('CUT', RAW_JT, new Date(Date.now() - 3600_000).toISOString()));
+
+      expect(errorLogger.record).not.toHaveBeenCalled();
+    });
+
+    it('`kt` après une coupure ACQUITTÉE : ERROR — véhicule peut-être libre alors qu’on le croit immobilisé', async () => {
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.ACKNOWLEDGED, ackedAt: new Date() });
+
+      await service.onEchoMoteur(echo('RESTORE', RAW_KT));
+
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+      expect(errorLogger.record).toHaveBeenCalledWith(
+        expect.stringContaining('signale une remise en route (kt)'),
+        'engine-control',
+        expect.anything(),
+        'ERROR',
+      );
+    });
+
+    it('aucune intention depuis 24 h, ou boîtier inconnu : aucune écriture', async () => {
+      boitier();
+      prisma.engineControlCommand.findFirst.mockResolvedValue(null as never);
+      await service.onEchoMoteur(echo('CUT'));
+
+      prisma.tracker.findUnique.mockResolvedValue(null as never);
+      await service.onEchoMoteur(echo('CUT'));
+
+      expect(prisma.engineControlCommand.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('accusé posé entre-temps par un autre chemin (count 0) : pas de diffusion fantôme', async () => {
+      boitier();
+      derniere({ action: EngineAction.CUT, status: CommandStatus.SENT });
+      prisma.engineControlCommand.updateMany.mockResolvedValue({ count: 0 } as never);
+
+      await service.onEchoMoteur(echo('CUT'));
+
+      expect(gateway.emitEngineCommandUpdate).not.toHaveBeenCalled();
+      expect(wire().ackMatch).not.toHaveBeenCalled();
+    });
+
+    it('🔴 une panne de base ne remonte JAMAIS : l’ingestion des trames du boîtier passe avant tout', async () => {
+      boitier();
+      prisma.engineControlCommand.findFirst.mockRejectedValue(new Error('DB down') as never);
+      await expect(service.onEchoMoteur(echo('CUT'))).resolves.toBeUndefined();
+      await expect(service.onEchoMoteur(undefined as never)).resolves.toBeUndefined();
+    });
+  });
+
+  /**
    * ── TRK-018 : UNE COMMANDE MOTEUR N'AVAIT PAS DE FIN DE VIE ────────────────────────
    *
    * Mesure du 2026-08-24 : 313 commandes `SENT`, dont 307 de plus de 24 h, 0 acquittee

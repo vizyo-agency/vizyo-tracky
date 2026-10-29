@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TrackerStatus } from '@prisma/client';
 import { decodeFrame } from '@vizyo/tracky-shared';
 import type { CobanFrame } from '@vizyo/tracky-shared';
@@ -15,6 +16,7 @@ import { ErrorLogger } from '../observability/error-logger.service';
 import { SocketRegistryService, type TrackerSocket } from '../socket-registry/socket-registry.service';
 import { UnknownTrackerRegistry } from '../unknown-trackers/unknown-trackers.registry';
 import { DemoModeService } from '../demo/demo-mode.service';
+import { lireEchoMoteur, TRACKER_ENGINE_ECHO_EVENT, type TrackerEngineEchoEvent } from './echo-moteur';
 
 @Injectable()
 export class TcpServerService implements OnModuleInit, OnModuleDestroy {
@@ -45,6 +47,9 @@ export class TcpServerService implements OnModuleInit, OnModuleDestroy {
     private readonly unknownTrackers: UnknownTrackerRegistry,
     // @Optional : les specs construisent ce service à la main, sans le drapeau de démo.
     @Optional() private readonly demoMode?: DemoModeService,
+    // @Optional, même raison : sans émetteur, un écho moteur hors fenêtre reste ingéré comme une
+    // position — le comportement d'avant le 08/10/2026, jamais pire.
+    @Optional() private readonly events?: EventEmitter2,
   ) {}
 
   onModuleInit(): void {
@@ -250,6 +255,51 @@ export class TcpServerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * ══ ÉCHO MOTEUR ORPHELIN (incident CDEF31 des 06 et 07/10/2026) — voir `echo-moteur.ts` ══
+   *
+   * Une trame `jt` / `kt` qu'aucun guetteur n'a prise est diffusée à `EngineControlService`, qui
+   * la rapproche de la dernière intention de l'application pour ce boîtier. Deux conditions, les
+   * mêmes que la règle C2 pour un accusé : l'IMEI exact de la session en tête de trame, et la
+   * session EN COURS du registre (une socket remplacée peut encore livrer des trames).
+   *
+   * ⚠️ Limite connue : un guetteur GÉNÉRIQUE en attente au même instant (commande `position_single`
+   * ou `raw` lancée depuis l'administration, motif `imei:…` large) consomme la trame avant nous —
+   * `tryMatch` ne dit pas QUI l'a prise. Rare (commande manuelle de diagnostic sur ce boîtier, à la
+   * minute de l'écho) ; la trame reste alors dans `wire_logs` avec son `ack`.
+   *
+   * L'heure du BOÎTIER voyage avec l'écho : c'est elle, pas l'heure de réception, qui dit si la
+   * trame répond à la dernière commande ou si elle sort d'un tampon revidé à la reconnexion.
+   *
+   * Ne lève jamais : l'ingestion des positions de ce boîtier passe avant tout.
+   */
+  private signalerEchoMoteurOrphelin(
+    imei: string,
+    socket: TrackerSocket,
+    raw: string,
+    deviceTime: Date | null | undefined,
+  ): void {
+    const action = lireEchoMoteur(imei, raw);
+    if (!action || !this.events) return;
+    const inscrite = this.registry.get(imei);
+    if (!inscrite || inscrite.socket !== socket) {
+      this.logger.warn(
+        { imeiFin: imei.slice(-4), action },
+        'Écho moteur reçu sur une session qui n’est plus celle du registre : non rapproché',
+      );
+      return;
+    }
+    try {
+      const heure = deviceTime && !Number.isNaN(deviceTime.getTime()) ? deviceTime.toISOString() : null;
+      const evt: TrackerEngineEchoEvent = { imei, action, raw, at: new Date().toISOString(), deviceTime: heure };
+      this.events.emit(TRACKER_ENGINE_ECHO_EVENT, evt);
+    } catch (err) {
+      this.logger.warn(
+        `Écho moteur non diffusé pour ${imei} : ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   /** Enregistre une erreur de traitement de trame TCP (catch partagé décode + dispatch). */
   private async recordTcpError(err: unknown, imei: string | null, raw: string): Promise<void> {
     await this.errorLogger
@@ -333,9 +383,12 @@ export class TcpServerService implements OnModuleInit, OnModuleDestroy {
 
         // #10 — un ACK de commande (ex position_single) peut decoder comme une
         // trame 'position' : on tente de resoudre un waiter en attente pour cet
-        // IMEI (no-op s'il n'y en a pas). Le pattern moteur J/K ne matche pas une
-        // position, donc seule une commande "position" est resolue ici.
-        this.ackWaiter.tryMatch(currentImei, frame.raw);
+        // IMEI (no-op s'il n'y en a pas). ⚠️ Le motif moteur MATCHE certaines positions :
+        // l'écho `jt` / `kt` du boîtier est une trame de position (`imei:…,jt,…`).
+        const accuseSolde = this.ackWaiter.tryMatch(currentImei, frame.raw);
+        // 08/10/2026 — un écho moteur qu'aucun guetteur n'a pris (arrivé après ses 15 s, ou avant
+        // son inscription) n'est plus perdu : il est diffusé pour être rapproché de la commande.
+        if (!accuseSolde) this.signalerEchoMoteurOrphelin(currentImei, socket, frame.raw, frame.deviceTime);
 
         if (frame.alarm && frame.alarm !== 'none') {
           const tracker = trackerAvantTrame;

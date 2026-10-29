@@ -54,6 +54,12 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
   let droitMoteur: boolean;
   /** null = la liste échoue (repli sur l'overlay) ; sinon, la liste servie depuis C7. */
   let commandesServies: unknown[] | null;
+  /** Profondeur demandée à l'API par le composant (08/10/2026 : 5 ne suffisait pas). */
+  let profondeurDemandee: number | undefined;
+  /** Nombre de lectures de la liste : un bouton ne la relit que pour un événement de SON boîtier. */
+  let lecturesListe: number;
+  /** Les événements ENGINE_COMMAND_UPDATED reçus par WebSocket, par boîtier. */
+  let majCommandes: ReturnType<typeof signal<Map<string, unknown>>>;
 
   // Les réglages du CAS (droits, liste servie) se posent AVANT `creer()` et ne sont remis à
   // zéro qu'ici : les remettre dans `creer()` écraserait ce que le test vient d'écrire — piège
@@ -74,6 +80,9 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
     cutActifs = signal(new Set<string>());
     cutEnAttente = signal(new Set<string>());
     enMouvement = signal(new Set<string>());
+    majCommandes = signal(new Map<string, unknown>());
+    profondeurDemandee = undefined;
+    lecturesListe = 0;
 
     TestBed.configureTestingModule({
       imports: [EngineControlButtonComponent],
@@ -97,14 +106,18 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
             cutActiveTrackerIds: cutActifs.asReadonly(),
             cutPendingTrackerIds: cutEnAttente.asReadonly(),
             movingTrackerIds: enMouvement.asReadonly(),
-            engineCommandUpdates: signal(new Map()),
+            engineCommandUpdates: majCommandes.asReadonly(),
           },
         },
         {
           provide: EngineControlService,
           useValue: {
             // Liste indisponible : le composant retombe sur l'overlay temps réel.
-            listCommands: () => (commandesServies ? of(commandesServies) : throwError(() => new Error('403'))),
+            listCommands: (_tracker: string, profondeur?: number) => {
+              profondeurDemandee = profondeur;
+              lecturesListe += 1;
+              return commandesServies ? of(commandesServies) : throwError(() => new Error('403'));
+            },
             requestCommand: () => of({}),
           },
         },
@@ -291,5 +304,181 @@ describe('C4 — engine-control-button : l’état est dit, et un clic de trop n
     expect(lien?.getAttribute('href') ?? '').toContain('/fleet-admin/activity');
     expect(lien?.getAttribute('href') ?? '').toContain('tab=engine');
     expect(sorties().length).toBe(3);
+  }));
+
+  // ══ 06 et 07/10/2026 — LA COUPURE EXÉCUTÉE MAIS NON ACQUITTÉE ═══════════════════════════════
+  //
+  // Deux soirs de suite, un véhicule de CDEF31 a été coupé (planning le 06/10, veilleur le 07/10)
+  // sans que l'accusé arrive à temps : le boîtier avait différé la coupure, son écho est arrivé
+  // après les 15 s du serveur. La commande est restée SENT. Avec la liste servie (veilleur depuis
+  // C7), l'écran disait « Moteur actif », « Rallumer » grisé, « Couper » offert : le veilleur a
+  // recoupé onze fois, puis appelé. Débloqué deux fois par SMS manuel.
+  //
+  // Les séquences ci-dessous sont celles de la base de production, du plus récent au plus ancien
+  // (ordre de l'API), dates rapportées à « maintenant ».
+
+  /** Une ligne de la liste servie. `ilYaMin` : âge de la commande. */
+  const ligne = (
+    action: 'CUT' | 'RESTORE',
+    status: string,
+    ilYaMin: number,
+    autres: Record<string, unknown> = {},
+  ): Record<string, unknown> => {
+    const quand = new Date(Date.now() - ilYaMin * 60_000).toISOString();
+    return {
+      id: `${action}-${status}-${ilYaMin}`, trackerId: TRACKER, action, status, source: 'MANUAL',
+      createdAt: quand, sentAt: status === 'REJECTED_SPEED' ? null : quand,
+      ackedAt: status === 'ACKNOWLEDGED' ? quand : null, confirmationExpected: false,
+      reason: null, lastError: null, requestedBy: '', ...autres,
+    };
+  };
+  const aide = (): string =>
+    (fixture.nativeElement.querySelector('.ec-aide') as HTMLElement | null)?.textContent?.trim() ?? '';
+
+  it('🔴 07/10 23:06 — coupure partie mais NON ACQUITTÉE : « Rallumer » est OFFERT, « Couper » refusé avec sa raison', fakeAsync(() => {
+    commandesServies = [
+      ligne('CUT', 'REJECTED_SPEED', 0.5), // 23:08:35 — « arrêté depuis seulement 44 s »
+      ligne('CUT', 'REJECTED_SPEED', 1), //   23:08:18 — « arrêté depuis seulement 27 s »
+      ligne('CUT', 'SENT', 2), //             23:06:45 — TCP écrit, accusé hors délai : reste SENT
+      ligne('RESTORE', 'ACKNOWLEDGED', 60 * 16), // 07:22 — rallumage du matin, acquitté
+      ligne('CUT', 'ACKNOWLEDGED', 60 * 17), //     05:55 — coupure du matin, acquittée
+    ];
+    creer();
+    tick();
+    fixture.detectChanges();
+
+    // Sous l'ancien code : « Moteur actif », « Rallumer » grisé, « Couper » offert.
+    expect(texteEtat()).toBe('Coupure non confirmée');
+    expect(bouton('rallumer')?.disabled).withContext('le seul geste utile cette nuit-là').toBeFalse();
+    expect(bouton('couper')?.disabled).withContext('une coupure en vol suffit : pas de recoupe en rafale').toBeTrue();
+    expect(bouton('couper')?.title).toContain('déjà partie');
+    expect(aide()).toContain('« Rallumer »');
+  }));
+
+  it('🔴 06/10 22:40 — coupure ÉCHUE sans preuve (SENT_UNCONFIRMED) : nul ne sait, les DEUX gestes sont offerts', fakeAsync(() => {
+    commandesServies = [
+      ligne('CUT', 'SENT_UNCONFIRMED', 35, { source: 'SCHEDULER' }),
+      ligne('RESTORE', 'ACKNOWLEDGED', 60 * 15, { source: 'SCHEDULER' }),
+    ];
+    creer();
+    tick();
+    fixture.detectChanges();
+
+    expect(texteEtat()).toBe('Coupure non confirmée');
+    expect(bouton('rallumer')?.disabled).toBeFalse();
+    expect(bouton('couper')?.disabled).withContext('« nul ne sait » : renvoyer la coupure a un sens').toBeFalse();
+    expect(aide()).toContain('inconnu');
+  }));
+
+  it('un rallumage ACQUITTÉ plus récent que la coupure non confirmée : moteur actif, rien d’autre à dire', fakeAsync(() => {
+    commandesServies = [
+      ligne('RESTORE', 'ACKNOWLEDGED', 1),
+      ligne('CUT', 'SENT_UNCONFIRMED', 40),
+    ];
+    creer();
+    tick();
+    fixture.detectChanges();
+
+    expect(texteEtat()).toBe('Moteur actif');
+    expect(bouton('rallumer')?.disabled).toBeTrue();
+    expect(bouton('couper')?.disabled).toBeFalse();
+    expect(aide()).toBe('');
+  }));
+
+  // Ce que ce cas PROUVE : la profondeur demandée à l'API (20). Le faux service rend toujours ses
+  // huit lignes, quelle que soit la profondeur ; l'affichage est vérifié, la fenêtre ne l'est pas.
+  it('🔴 la liste lue passe à 20 lignes (avec 5, six refus sortaient la coupure de la fenêtre)', fakeAsync(() => {
+    commandesServies = [
+      ...[1, 2, 3, 4, 5, 6].map((n) => ligne('CUT', 'REJECTED_SPEED', n / 10)),
+      ligne('CUT', 'SENT', 2),
+      ligne('RESTORE', 'ACKNOWLEDGED', 60),
+    ];
+    creer();
+    tick();
+    fixture.detectChanges();
+
+    // Avec 5 lignes, la coupure en vol tombait hors de la fenêtre dès le cinquième refus.
+    expect(profondeurDemandee).toBe(20);
+    expect(texteEtat()).toBe('Coupure non confirmée');
+    expect(bouton('rallumer')?.disabled).toBeFalse();
+  }));
+
+  it('une observation de contact (DEVICE_OBSERVED) ne fait pas un véhicule coupé — même règle que le serveur', fakeAsync(() => {
+    commandesServies = [ligne('CUT', 'ACKNOWLEDGED', 3, { source: 'DEVICE_OBSERVED' })];
+    creer();
+    tick();
+    fixture.detectChanges();
+
+    expect(texteEtat()).toBe('Moteur actif');
+    expect(bouton('rallumer')?.disabled).toBeTrue();
+  }));
+
+  it('🔴 l’écho tardif rapproché par le serveur arrive par WebSocket : l’écran passe à « Moteur coupé » sans rechargement', fakeAsync(() => {
+    commandesServies = [ligne('CUT', 'SENT', 1), ligne('RESTORE', 'ACKNOWLEDGED', 60)];
+    creer();
+    tick();
+    fixture.detectChanges();
+    expect(texteEtat()).toBe('Coupure non confirmée');
+
+    // 69 s après l'ordre, le boîtier répond `jt` ; le serveur acquitte la commande et la diffuse.
+    commandesServies = [ligne('CUT', 'ACKNOWLEDGED', 1), ligne('RESTORE', 'ACKNOWLEDGED', 60)];
+    majCommandes.set(new Map([[TRACKER, { commandId: 'CUT-SENT-1', trackerId: TRACKER, action: 'CUT', status: 'ACKNOWLEDGED' }]]));
+    fixture.detectChanges();
+    tick();
+    fixture.detectChanges();
+
+    expect(texteEtat()).toBe('Moteur coupé');
+    expect(bouton('rallumer')?.disabled).toBeFalse();
+    expect(bouton('couper')?.title).toContain('déjà coupé');
+    expect(aide()).toBe('');
+  }));
+
+  it('une coupure restée PENDING au-delà de 2 min est orpheline : « Couper » redevient offert (le serveur la renverra)', fakeAsync(() => {
+    commandesServies = [ligne('CUT', 'PENDING', 5), ligne('RESTORE', 'ACKNOWLEDGED', 60)];
+    creer();
+    tick();
+    fixture.detectChanges();
+
+    expect(texteEtat()).toBe('Coupure non confirmée');
+    expect(bouton('rallumer')?.disabled).toBeFalse();
+    expect(bouton('couper')?.disabled).withContext('sinon grisé pour toujours').toBeFalse();
+  }));
+
+  it('une coupure PENDING récente est en vol : « Couper » reste refusé', fakeAsync(() => {
+    commandesServies = [ligne('CUT', 'PENDING', 0.5), ligne('RESTORE', 'ACKNOWLEDGED', 60)];
+    creer();
+    tick();
+    fixture.detectChanges();
+
+    expect(bouton('couper')?.disabled).toBeTrue();
+    expect(bouton('rallumer')?.disabled).toBeFalse();
+  }));
+
+  it('🔴 un événement d’un AUTRE boîtier ne relit pas la liste de celui-ci — un événement neuf du sien, une fois', fakeAsync(() => {
+    // Avant : la carte des événements change à chaque commande de la flotte, et chaque bouton déjà
+    // concerné relisait sa liste — 30 boutons × 90 événements dans la vague de 22:00.
+    commandesServies = [ligne('CUT', 'SENT', 1), ligne('RESTORE', 'ACKNOWLEDGED', 60)];
+    creer();
+    tick();
+    fixture.detectChanges();
+    const evtSien = { commandId: 'x', trackerId: TRACKER, action: 'CUT', status: 'SENT' };
+    majCommandes.set(new Map([[TRACKER, evtSien]]));
+    fixture.detectChanges();
+    tick();
+    const apresSien = lecturesListe;
+
+    // Trois événements d'autres boîtiers : la carte change, l'entrée de CE boîtier non.
+    for (const autre of ['t-2', 't-3', 't-4']) {
+      majCommandes.set(new Map([...majCommandes(), [autre, { trackerId: autre }]]));
+      fixture.detectChanges();
+      tick();
+    }
+    expect(lecturesListe).withContext('relu pour des commandes qui ne le concernent pas').toBe(apresSien);
+
+    // Un nouvel événement de CE boîtier : une lecture, une seule.
+    majCommandes.set(new Map([...majCommandes(), [TRACKER, { ...evtSien, status: 'ACKNOWLEDGED' }]]));
+    fixture.detectChanges();
+    tick();
+    expect(lecturesListe).toBe(apresSien + 1);
   }));
 });

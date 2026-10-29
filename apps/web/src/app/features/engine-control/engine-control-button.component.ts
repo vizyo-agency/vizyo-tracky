@@ -26,6 +26,31 @@ import { ToastService } from '../../shared/ui/toast/toast.service';
 /** Sprint 2 — fenêtre d'attente de confirmation côté UI (aligne le défaut backend 90s). */
 const CONFIRM_WINDOW_MS = 90_000;
 
+/**
+ * Profondeur de la liste lue pour l'état du moteur. 5 ne suffisait pas : chaque refus
+ * (REJECTED_SPEED) est une ligne, et quelques clics refusés suffisaient à pousser la vraie
+ * coupure hors de la fenêtre — l'écran repassait alors à « Moteur actif ». L'API plafonne à 50.
+ */
+const PROFONDEUR_HISTORIQUE = 20;
+
+/**
+ * Statuts d'une COUPURE qui peut avoir immobilisé le véhicule : acquittée, ou partie sans preuve
+ * (en vol, ou échue « nul ne sait »). Un refus ou un échec d'envoi n'a rien coupé.
+ */
+const COUPE_POSSIBLE: ReadonlySet<EngineControlCommandDto['status']> = new Set([
+  'PENDING',
+  'SENT',
+  'SENT_UNCONFIRMED',
+  'ACKNOWLEDGED',
+]);
+
+/**
+ * Au-delà, une coupure encore PENDING n'est plus « en vol » : elle est orpheline (T48 — le bail de
+ * dispatch du serveur est de 60 s) et le serveur la renverra à la prochaine demande. « Couper »
+ * doit alors rester offert, sinon il resterait grisé pour toujours.
+ */
+const PENDING_ORPHELINE_MS = 120_000;
+
 @Component({
   selector: 'app-engine-control-button',
   standalone: true,
@@ -104,6 +129,10 @@ const CONFIRM_WINDOW_MS = 90_000;
       -->
       @if (motifBloquantAffiche(); as motif) {
         <p class="ec-refus">{{ motif }}</p>
+      }
+      <!-- Coupure partie sans preuve (06 et 07/10/2026) : la sortie est dite, en clair. -->
+      @if (aideCoupureNonConfirmee(); as aide) {
+        <p class="ec-refus ec-aide">{{ aide }}</p>
       }
 
       <!--
@@ -282,6 +311,8 @@ const CONFIRM_WINDOW_MS = 90_000;
       margin: 0; max-width: 320px; font-size: 11.5px; line-height: 1.45;
       color: var(--fg-secondary); text-wrap: pretty;
     }
+    /* La sortie d'une coupure non confirmée : même place que le refus, teinte de l'attente. */
+    .ec-aide { color: var(--texte-attente); font-weight: 600; }
 
     /* C4 — l'état du moteur, lisible AVANT les boutons. Jetons uniquement, jamais de palette
        Tailwind en dur : cette pastille doit rester lisible dans les deux thèmes. */
@@ -413,8 +444,56 @@ export class EngineControlButtonComponent implements OnInit {
     return this.realtime.snapshot().find((v) => v.trackerId === this.trackerId())?.vehicleId;
   });
 
-  readonly isCutActive = computed(() => {
+  /**
+   * ══ L'ÉTAT DU MOTEUR LU DANS LA LISTE — incident CDEF31 des 06 et 07/10/2026 ═══════════════
+   *
+   * Deux soirs de suite, une coupure (planning, puis veilleur) n'a pas été ACQUITTÉE : le boîtier
+   * l'a différée, et son écho est arrivé après les 15 s d'attente du serveur. La règle d'avant ne
+   * comptait qu'une coupure ACKNOWLEDGED : l'écran disait « Moteur actif », « Rallumer » était
+   * grisé (« Le moteur n'est pas coupé. »), « Couper » restait offert. Le véhicule ne démarrait
+   * plus, et le veilleur, privé du seul geste utile, a recoupé onze fois avant d'appeler. Débloqué
+   * les deux soirs par un SMS manuel.
+   *
+   * Le correctif de ce piège existait déjà — dans la branche « liste vide » (coupé OU en attente →
+   * Rallumer). C7 (24/09) ayant servi la liste au veilleur, il passait par l'autre branche. Les
+   * deux disent désormais la même chose :
+   *   - 'actif'          aucune coupure possible plus récente que le dernier rallumage ACQUITTÉ ;
+   *   - 'coupe'          la dernière coupure est acquittée ;
+   *   - 'en-vol'         partie (PENDING, SENT) sans preuve — elle peut s'appliquer à tout moment :
+   *                      « Rallumer » offert, « Couper » refusé (une coupure en vol suffit) ;
+   *   - 'non-confirmee'  échue sans preuve (SENT_UNCONFIRMED) : nul ne sait, les DEUX gestes ont
+   *                      un sens et les deux sont offerts ;
+   *   - null             liste vide → repli sur l'overlay temps réel (`isCutActive`).
+   *
+   * Rallumer est toujours sûr : l'API supplante toute coupure encore en vol. Les observations
+   * (DEVICE_OBSERVED) ne comptent pas, comme côté serveur (`etatCoupeParTracker`) : c'étaient des
+   * stationnements, pas des coupures.
+   */
+  private readonly etatDepuisListe = computed<'actif' | 'coupe' | 'en-vol' | 'non-confirmee' | null>(() => {
     const cmds = this.recentCommands();
+    if (cmds.length === 0) return null;
+    // La liste arrive de la plus récente à la plus ancienne (API : `createdAt desc`).
+    const coupe = cmds.find(
+      (c) => c.action === 'CUT' && c.source !== 'DEVICE_OBSERVED' && COUPE_POSSIBLE.has(c.status),
+    );
+    if (!coupe) return 'actif';
+    // Un RESTORE seulement SENT ne nettoie jamais l'état : la soumission au transport n'est pas
+    // une preuve d'exécution par le boîtier.
+    const rallumage = cmds.find(
+      (c) => c.action === 'RESTORE' && c.source !== 'DEVICE_OBSERVED' && c.status === 'ACKNOWLEDGED',
+    );
+    if (rallumage && new Date(rallumage.createdAt) > new Date(coupe.createdAt)) return 'actif';
+    if (coupe.status === 'ACKNOWLEDGED') return 'coupe';
+    if (coupe.status === 'SENT_UNCONFIRMED') return 'non-confirmee';
+    if (coupe.status === 'PENDING' && this._now() - new Date(coupe.createdAt).getTime() > PENDING_ORPHELINE_MS) {
+      return 'non-confirmee';
+    }
+    return 'en-vol';
+  });
+
+  readonly isCutActive = computed(() => {
+    const etat = this.etatDepuisListe();
+    if (etat !== null) return etat !== 'actif';
     // Sprint 3, RÉVISÉ le 24/09/2026 (C7) — le VEILLEUR recevait un `403` sur
     // `GET /engine-control/commands` : sa liste `recentCommands` était TOUJOURS vide, et ce repli
     // sur l'overlay temps réel était sa SEULE source d'état. Un canal que chaque recréation de
@@ -431,29 +510,16 @@ export class EngineControlButtonComponent implements OnInit {
     // `ENGINE_COMMAND_UPDATED` reçus via `ops:fleet`), même sémantique (CUT ACKNOWLEDGED =
     // coupé, RESTORE = rallumé). Sans ce repli le bouton restait bloqué sur « Couper » → le
     // veilleur ne pouvait JAMAIS rallumer (il recoupait à chaque clic).
-    if (cmds.length === 0) {
-      // Coupé CONFIRMÉ (cutActiveTrackerIds) OU coupé EN ATTENTE de confirmation
-      // (cutPendingTrackerIds) → on propose « Rétablir » dans les deux cas. Sinon le
-      // veilleur — privé du détail des commandes (commandState) — reste sur « Couper »
-      // tant que la coupe n'est pas confirmée et reclique en boucle (observé en prod :
-      // 3 CUT d'affilée, véhicule bloqué « en attente »). Un RESTORE ou un FAILED nettoie
-      // les DEUX ensembles côté RealtimeService → le bouton revient à « Couper ».
-      const tid = this.trackerId();
-      return this.realtime.cutActiveTrackerIds().has(tid) || this.realtime.cutPendingTrackerIds().has(tid);
-    }
-    // Sprint 2 (Obj 3) — etat "coupe" = derniere commande CONFIRMEE (ACKNOWLEDGED),
-    // TOUTES sources incluses (DEVICE_OBSERVED = coupure SMS/externe detectee par la
-    // chute d'ignition). Une coupure seulement SENT (pas encore confirmee) NE compte
-    // PAS : l'etat ne bascule qu'a la preuve reelle — jamais de faux succes.
-    const lastCut = cmds.find((c) => c.action === 'CUT' && c.status === 'ACKNOWLEDGED');
-    // Un RESTORE seulement SENT ne nettoie jamais l'état : la soumission au
-    // transport n'est pas une preuve d'exécution par le boîtier.
-    const lastRestore = cmds.find(
-      (c) => c.action === 'RESTORE' && c.status === 'ACKNOWLEDGED',
-    );
-    if (!lastCut) return false;
-    if (!lastRestore) return true;
-    return new Date(lastCut.createdAt) > new Date(lastRestore.createdAt);
+    //
+    // Coupé CONFIRMÉ (cutActiveTrackerIds) OU coupé EN ATTENTE de confirmation
+    // (cutPendingTrackerIds) → on propose « Rétablir » dans les deux cas. Sinon le
+    // veilleur — privé du détail des commandes (commandState) — reste sur « Couper »
+    // tant que la coupe n'est pas confirmée et reclique en boucle (observé en prod :
+    // 3 CUT d'affilée, véhicule bloqué « en attente »). Un RESTORE ou un FAILED nettoie
+    // les DEUX ensembles côté RealtimeService → le bouton revient à « Couper ».
+    // (La liste servie suit la même règle depuis le 08/10/2026 : cf. `etatDepuisListe`.)
+    const tid = this.trackerId();
+    return this.realtime.cutActiveTrackerIds().has(tid) || this.realtime.cutPendingTrackerIds().has(tid);
   });
 
   // Sprint 2 — tick 5s : fait basculer l'affichage "en attente" -> "non confirmee"
@@ -768,13 +834,17 @@ export class EngineControlButtonComponent implements OnInit {
    * coupure COMMANDÉE mais pas encore prouvée. Pour l'opérateur de nuit ce n'est pas un détail :
    * « en attente » veut dire « ne considérez pas ce véhicule comme immobilisé ».
    *
-   * Lecture alignée sur `isCutActive()` — quand la liste des commandes est servie (tous rôles
-   * sauf le veilleur), une coupe active y est forcément ACQUITTÉE ; sinon l'état vient de
-   * l'overlay temps réel, qui distingue confirmé et en attente.
+   * Lecture alignée sur `isCutActive()` — quand la liste des commandes est servie (tous rôles,
+   * veilleur compris depuis C7), l'état vient d'elle (`etatDepuisListe`) ; sinon de l'overlay
+   * temps réel. Les deux distinguent confirmé et en attente.
+   *
+   * 08/10/2026 — l'ancienne lecture disait « une coupe active y est forcément ACQUITTÉE » : c'est
+   * précisément ce qui cachait une coupure exécutée mais non acquittée (incident des 06 et 07/10).
    */
   protected readonly etatMoteur = computed<'coupe' | 'attente' | 'actif'>(() => {
+    const etat = this.etatDepuisListe();
+    if (etat !== null) return etat === 'actif' ? 'actif' : etat === 'coupe' ? 'coupe' : 'attente';
     if (!this.isCutActive()) return 'actif';
-    if (this.recentCommands().length > 0) return 'coupe';
     return this.realtime.cutActiveTrackerIds().has(this.trackerId()) ? 'coupe' : 'attente';
   });
 
@@ -792,7 +862,8 @@ export class EngineControlButtonComponent implements OnInit {
    * seulement le moyen, pour un clic de trop, de défaire le geste précédent.
    */
   protected readonly peutCouperMaintenant = computed(
-    () => !this.isCutActive() && this.canCut().allowed,
+    // Coupure échue sans preuve (« nul ne sait ») : renvoyer la coupure a un sens, comme rallumer.
+    () => (!this.isCutActive() || this.etatDepuisListe() === 'non-confirmee') && this.canCut().allowed,
   );
   protected readonly peutRallumerMaintenant = computed(
     () => this.isCutActive() && this.canRestore(),
@@ -800,8 +871,27 @@ export class EngineControlButtonComponent implements OnInit {
 
   protected readonly motifCoupeIndisponible = computed<string | null>(() => {
     if (this.peutCouperMaintenant()) return null;
-    if (this.isCutActive()) return 'Le moteur est déjà coupé.';
+    if (this.etatDepuisListe() === 'en-vol') {
+      return 'Une coupure est déjà partie : le boîtier ne l’a pas encore confirmée.';
+    }
+    if (this.isCutActive() && this.etatDepuisListe() !== 'non-confirmee') return 'Le moteur est déjà coupé.';
     return this.canCut().reason ?? 'Coupure indisponible.';
+  });
+
+  /**
+   * 06 et 07/10/2026 — une coupure sans preuve : on dit à l'opérateur ce qu'il PEUT faire, pas
+   * seulement ce qu'il ne peut pas. C'est la phrase qui a manqué au veilleur deux soirs de suite.
+   */
+  protected readonly aideCoupureNonConfirmee = computed<string | null>(() => {
+    if (!this.peutRallumerMaintenant()) return null;
+    switch (this.etatDepuisListe()) {
+      case 'en-vol':
+        return 'Coupure envoyée, pas encore confirmée par le boîtier : elle peut s’appliquer à tout moment. Si le véhicule doit repartir, utilisez « Rallumer ».';
+      case 'non-confirmee':
+        return 'Le boîtier n’a jamais confirmé cette coupure : l’état réel du véhicule est inconnu. « Rallumer » le libère, « Couper » renvoie la coupure.';
+      default:
+        return null;
+    }
   });
 
   protected readonly motifRallumageIndisponible = computed<string | null>(() => {
@@ -917,11 +1007,21 @@ export class EngineControlButtonComponent implements OnInit {
     return base + this.dormantConfirmNotice();
   });
 
+  /**
+   * Dernier événement temps réel traité pour CE boîtier. La carte des événements est remplacée à
+   * chaque événement de N'IMPORTE QUEL boîtier : sans ce repère, chaque bouton déjà concerné
+   * relisait sa liste à chaque commande de la flotte — 30 boutons × 90 événements dans la vague de
+   * 22:00, assez pour heurter la limite de 100 requêtes par minute et faire échouer la lecture
+   * (l'écran retombe alors sur l'overlay, moins précis). Seul un événement NOUVEAU de ce boîtier
+   * recharge la liste (08/10/2026).
+   */
+  private dernierEvenementTraite: unknown = undefined;
+
   // React to real-time engine command updates for this tracker (field initializer = injection context)
   private readonly engineUpdateEffect = effect(() => {
-    const updates = this.realtime.engineCommandUpdates();
-    const update = updates.get(this.trackerId());
-    if (update) {
+    const update = this.realtime.engineCommandUpdates().get(this.trackerId());
+    if (update && update !== this.dernierEvenementTraite) {
+      this.dernierEvenementTraite = update;
       this.loadRecentCommands();
     }
   });
@@ -1080,7 +1180,7 @@ export class EngineControlButtonComponent implements OnInit {
   private async loadRecentCommands(retries = 2): Promise<void> {
     try {
       const cmds = await firstValueFrom(
-        this.engineControl.listCommands(this.trackerId(), 5),
+        this.engineControl.listCommands(this.trackerId(), PROFONDEUR_HISTORIQUE),
       );
       this.recentCommands.set(cmds);
     } catch (err) {
