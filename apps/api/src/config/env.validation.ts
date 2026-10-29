@@ -165,6 +165,10 @@ const envSchema = z.object({
   VAPID_PUBLIC_KEY: z.string().default(''),
   VAPID_PRIVATE_KEY: z.string().default(''),
   VAPID_SUBJECT: z.string().default('mailto:contact@vizyoagency.com'),
+  // INTERRUPTEUR DE SÛRETÉ (29/10/2026) — liste d'e-mails, séparés par des virgules. Si elle n'est pas vide,
+  // les notifications push ne partent QU'À ces comptes : tous les autres sont écartés, sans toucher à leurs
+  // abonnements (la levée est immédiate : vider la variable). Vide = comportement normal.
+  PUSH_ONLY_EMAILS: z.string().default(''),
 
   /**
    * Périmètre de déploiement du push d'alerte.

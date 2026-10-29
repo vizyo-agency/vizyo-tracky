@@ -110,11 +110,24 @@ export function deviceLabel(userAgent?: string | null): string | null {
   return parts.length > 0 ? parts.join(' · ') : null;
 }
 
+/**
+ * Liste blanche d'e-mails (`PUSH_ONLY_EMAILS`) : séparateurs virgule, point-virgule ou espace ; casse ignorée.
+ * Une chaîne vide donne une liste vide — c'est-à-dire AUCUNE restriction.
+ */
+export function listeBlanchePush(brut: string | undefined | null): string[] {
+  return (brut ?? '')
+    .split(/[,;\s]+/)
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.length > 0);
+}
+
 @Injectable()
 export class WebPushService {
   private readonly logger = new Logger(WebPushService.name);
   private readonly enabled: boolean;
   private readonly publicKey: string;
+  /** Interrupteur de sûreté : si non vide, SEULS ces e-mails reçoivent un push (cf. env `PUSH_ONLY_EMAILS`). */
+  private readonly seulsAutorises: string[];
 
   constructor(
     private readonly prisma: PrismaService,
@@ -125,6 +138,12 @@ export class WebPushService {
     const privateKey = this.config.get('VAPID_PRIVATE_KEY', { infer: true });
     const subject = this.config.get('VAPID_SUBJECT', { infer: true });
     this.enabled = !!(this.publicKey && privateKey);
+    this.seulsAutorises = listeBlanchePush(this.config.get('PUSH_ONLY_EMAILS', { infer: true }));
+    if (this.seulsAutorises.length > 0) {
+      this.logger.warn(
+        `[push] INTERRUPTEUR DE SÛRETÉ ACTIF — seuls ${this.seulsAutorises.length} compte(s) reçoivent des notifications (PUSH_ONLY_EMAILS)`,
+      );
+    }
     if (this.enabled) {
       webpush.setVapidDetails(subject, this.publicKey, privateKey);
       this.logger.log('Web Push enabled (VAPID configured)');
@@ -376,6 +395,38 @@ export class WebPushService {
     if (subs.length === 0) {
       this.logger.debug(`[push] no targets (${contextLabel})`);
       return { sent: 0, failed: 0, results: [] };
+    }
+
+    // ══ INTERRUPTEUR DE SÛRETÉ (29/10/2026) ═════════════════════════════════════════════════════
+    // Toute notification push de l'application passe par CE cœur d'envoi (le seul appel à
+    // `webpush.sendNotification`) : c'est donc ici, et seulement ici, qu'on écarte tout le monde sauf
+    // la liste blanche. Demandé par le propriétaire pour corriger des bugs sans spammer les utilisateurs.
+    // ⚠️ Échec FERMÉ : si les comptes ne peuvent pas être résolus, RIEN ne part — mieux vaut une notification
+    // de moins qu'une de trop. Les abonnements ne sont ni supprimés ni modifiés : vider la variable suffit.
+    if (this.seulsAutorises.length > 0) {
+      let autorises: Set<string>;
+      try {
+        const ids = [...new Set(subs.map((s) => s.userId ?? fallbackUserId).filter((i): i is string => !!i))];
+        const users = ids.length
+          ? await this.prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, email: true } })
+          : [];
+        autorises = new Set(
+          users.filter((u) => this.seulsAutorises.includes((u.email ?? '').toLowerCase())).map((u) => u.id),
+        );
+      } catch (err) {
+        this.logger.error(
+          `[push] interrupteur de sûreté : comptes illisibles (${contextLabel}) — rien n'est envoyé : ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { sent: 0, failed: 0, results: [] };
+      }
+      const gardees = subs.filter((s) => autorises.has(s.userId ?? fallbackUserId ?? ''));
+      if (gardees.length < subs.length) {
+        this.logger.log(
+          `[push] interrupteur de sûreté (${contextLabel}) : ${subs.length - gardees.length} abonnement(s) écarté(s), ${gardees.length} conservé(s)`,
+        );
+      }
+      if (gardees.length === 0) return { sent: 0, failed: 0, results: [] };
+      subs = gardees;
     }
 
     // V1.10 — Wrapping pour compatibilite ngsw-worker (Angular Service Worker).
