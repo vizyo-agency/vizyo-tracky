@@ -476,6 +476,15 @@ const CATALOG: CatalogEntry[] = [
     periodic: { everyMs: 300_000, offsetMs: 30_000 },
   },
   {
+    id: 'sentinelle-notifs-interdites',
+    source: 'observability/sentinelle-notifs-interdites.service.ts', label: 'Sentinelle des notifications interdites', category: 'Système & observabilité',
+    kind: 'cron', scheduleHuman: 'toutes les 5 min (à :20 s)', criticality: 'haute', antiOverlap: true,
+    settingsRoute: '/admin/alerts',
+    note: "Demandée par le propriétaire le 29/10/2026, le jour où il a coupé les notifications automatiques de tous les comptes sauf le sien (NOTIFS_ONLY_EMAILS). Un interrupteur qui retient trois cœurs d'envoi ne dit pas s'il fuit : celle-ci regarde ce qui est RÉELLEMENT PARTI. Liste vide = interrupteur levé = elle se tait. Inerte sur la démo (comptes fictifs, aucun interrupteur).",
+    purpose: "Relit les journaux d'envoi (push_logs, email_logs, sms_logs) des 15 dernières minutes et compare les destinataires de chaque envoi AUTOMATIQUE à la liste blanche ; écrit au centre d'alerte une ligne CRITICAL par canal et par heure au plus, relayée aux super-admins. Sans elle, une fuite qui contourne l'interrupteur ne se verrait qu'à la plainte d'un destinataire.",
+    periodic: { everyMs: 300_000, offsetMs: 20_000 },
+  },
+  {
     id: 'agents-locaux-sentinelle',
     source: 'background-tasks/agents-locaux-sentinelle.service.ts', label: 'Sentinelle des agents du poste', category: 'Système & observabilité',
     kind: 'cron', scheduleHuman: 'toutes les heures (à h:50)', criticality: 'haute', antiOverlap: false,
