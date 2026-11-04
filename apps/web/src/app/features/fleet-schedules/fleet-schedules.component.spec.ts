@@ -14,7 +14,7 @@
  *   4. l'action de masse est repliée, et dit dès l'en-tête qu'un super-admin doit choisir une société ;
  *   5. aucun emoji ne sert d'icône : des SVG.
  */
-import { signal } from '@angular/core';
+import { Component, input, signal } from '@angular/core';
 import { ComponentFixture, fakeAsync, TestBed, tick } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
@@ -25,6 +25,7 @@ import { PermissionsService } from '../../core/services/permissions.service';
 import { RealtimeService } from '../../core/services/realtime.service';
 import { VehicleSchedulesApiService } from '../../core/services/vehicle-schedules.service';
 import { ToastService } from '../../shared/ui/toast/toast.service';
+import { VehicleScheduleComponent } from '../vehicles/vehicle-schedule/vehicle-schedule.component';
 import {
   CLE_VOLETS_HORAIRES,
   FleetSchedulesComponent,
@@ -194,6 +195,101 @@ describe('Horaires de la flotte — les cartes repliables (06/10/2026)', () => {
     expect(el(f, '.help-note svg')).not.toBeNull();
     // Ni 🏢 ni 💡 ni ✅ — aucun pictogramme du bloc emoji dans toute la page rendue.
     expect(/[\u{1F300}-\u{1FAFF}\u{2705}\u{26A0}]/u.test(f.nativeElement.textContent ?? '')).toBe(false);
+    f.destroy();
+  }));
+});
+
+/** L'éditeur de la fiche véhicule est testé ailleurs : ici le volet n'a besoin que d'un contenu. */
+@Component({ selector: 'app-vehicle-schedule', template: '<p>éditeur</p>' })
+class EditeurBidon {
+  readonly vehicleId = input<string>();
+  readonly hasTracker = input<boolean>();
+}
+
+/**
+ * Le volet d'édition d'une ligne — relevé de la répétition de démo du 04/11/2026 (étape 7) :
+ * « le titre et la croix de fermeture passent sous la barre du haut ; Échap ne le ferme pas ».
+ * La barre du haut du layout est à z-index 1800 : un calque qui reste en dessous disparaît derrière.
+ */
+describe('Horaires de la flotte — le volet d’édition (04/11/2026)', () => {
+  function monter(): ComponentFixture<FleetSchedulesComponent> {
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({
+      imports: [FleetSchedulesComponent],
+      providers: [
+        provideRouter([]),
+        { provide: VehicleSchedulesApiService, useValue: { listFleet: () => of(reponse()) } },
+        {
+          provide: RealtimeService,
+          useValue: {
+            cutActiveTrackerIds: signal(new Set<string>()),
+            cutPendingTrackerIds: signal(new Set<string>()),
+            movingTrackerIds: signal(new Set<string>()),
+            cutStateSnapshot: () => new Map(),
+            seedMovingState: () => undefined,
+            seedCutState: () => undefined,
+          },
+        },
+        { provide: FleetFilterService, useValue: { selectedFleetId: signal<string | null>(null) } },
+        { provide: AuthService, useValue: { user: signal({ role: 'FLEET_ADMIN' }), isWatchman: () => false } },
+        { provide: PermissionsService, useValue: { can: () => true } },
+        { provide: ToastService, useValue: { error: () => undefined, success: () => undefined, warning: () => undefined } },
+      ],
+    }).overrideComponent(FleetSchedulesComponent, {
+      remove: { imports: [VehicleScheduleComponent] },
+      add: { imports: [EditeurBidon] },
+    });
+    const fixture = TestBed.createComponent(FleetSchedulesComponent);
+    fixture.detectChanges();
+    tick();
+    fixture.detectChanges();
+    return fixture;
+  }
+
+  const ouvrir = (f: ComponentFixture<FleetSchedulesComponent>): void => {
+    (f.componentInstance as unknown as { openEditor(r: FleetScheduleRowDto): void }).openEditor(ligne());
+    f.detectChanges();
+  };
+  const echap = (): void => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  };
+  const el = (f: ComponentFixture<FleetSchedulesComponent>, sel: string): HTMLElement | null =>
+    f.nativeElement.querySelector(sel);
+
+  it('le volet et son voile passent AU-DESSUS de la barre du haut (z-index 1800)', fakeAsync(() => {
+    const f = monter();
+    ouvrir(f);
+    const volet = el(f, '.drawer')!;
+    const voile = el(f, '.drawer-scrim')!;
+    expect(volet).not.toBeNull();
+    expect(Number(getComputedStyle(volet).zIndex)).toBeGreaterThan(1800);
+    expect(Number(getComputedStyle(voile).zIndex)).toBeGreaterThan(1800);
+    // Le volet reste au-dessus de son propre voile, et se déclare comme une boîte de dialogue.
+    expect(Number(getComputedStyle(volet).zIndex)).toBeGreaterThan(Number(getComputedStyle(voile).zIndex));
+    expect(volet.getAttribute('role')).toBe('dialog');
+    expect(el(f, '.drawer-head button')!.getAttribute('aria-label')).toBe('Fermer');
+    f.destroy();
+  }));
+
+  it('Échap ferme le volet', fakeAsync(() => {
+    const f = monter();
+    ouvrir(f);
+    expect(el(f, '.drawer')).not.toBeNull();
+    echap();
+    tick();
+    f.detectChanges();
+    expect(el(f, '.drawer')).toBeNull();
+    f.destroy();
+  }));
+
+  it('un clic à côté (le voile) ferme le volet, et Échap sans volet ne fait rien', fakeAsync(() => {
+    const f = monter();
+    echap(); // rien d'ouvert : aucune erreur
+    ouvrir(f);
+    el(f, '.drawer-scrim')!.click();
+    tick();
+    f.detectChanges();
+    expect(el(f, '.drawer')).toBeNull();
     f.destroy();
   }));
 });

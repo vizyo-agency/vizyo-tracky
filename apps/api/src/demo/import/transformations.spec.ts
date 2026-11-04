@@ -5,6 +5,7 @@ import {
   Correspondances,
   SYSTEM_USER_ID,
   abonnementDemo,
+  numeroSimDeDemo,
   planningRapportDemo,
   transformerAlerte,
   transformerAnalyse,
@@ -164,6 +165,20 @@ describe("transformations de l'import de démonstration", () => {
     const sortie = transformerVehicule(ligneSource('Vehicle', { id: 'v-2', brand: null, model: null }) as never, ctx, 'AB-123-CD');
     expect(sortie.brand).toBeNull();
     expect(sortie.model).toBeNull();
+  });
+
+  it('SIM de démo : un boîtier que la source ne rattache à aucune SIM reçoit tout de même un numéro de fiction', () => {
+    // Avec une SIM importée : son numéro de démo, inchangé.
+    expect(numeroSimDeDemo(SEL, 't-1', '+33639981234')).toBe('+33639981234');
+
+    // Sans SIM (trou d'inventaire de la production) : un numéro dérivé du boîtier — jamais vide,
+    // sinon l'écran des véhicules affiche « SIM manquante » devant le prospect (relevé du 04/11/2026).
+    const repli = numeroSimDeDemo(SEL, 't-sans-sim', null);
+    expect(repli).toMatch(/^\+3363998\d{4}$/); // plage de fiction de l'ARCEP, comme `msisdnDemo`
+    // Déterministe : deux rafraîchissements donnent le même numéro…
+    expect(numeroSimDeDemo(SEL, 't-sans-sim', null)).toBe(repli);
+    // …qui dépend du sel : une autre démo n'a pas la même série.
+    expect(numeroSimDeDemo('un-autre-sel-tout-aussi-long-que-lautre', 't-sans-sim', null)).not.toBe(repli);
   });
 
   it('Tracker : IMEI régénéré, numéro de SIM remplacé par celui de démo, overrides admin effacés', () => {

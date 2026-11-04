@@ -319,10 +319,10 @@
   <!-- Drawer d'édition (réutilise l'éditeur de la fiche véhicule → synchro garantie) -->
   @if (editingVehicleId(); as vid) {
     <div class="drawer-scrim" (click)="closeEditor()"></div>
-    <aside class="drawer">
+    <aside class="drawer" role="dialog" aria-modal="true" aria-label="Horaires du véhicule {{ editingPlate() }}">
       <div class="drawer-head">
         <h3>Horaires — {{ editingPlate() }}</h3>
-        <button type="button" class="btn icon" (click)="closeEditor()"><lucide-icon [img]="XIcon" [size]="18" /></button>
+        <button type="button" class="btn icon" aria-label="Fermer" (click)="closeEditor()"><lucide-icon [img]="XIcon" [size]="18" /></button>
       </div>
       <div class="drawer-body">
         <app-vehicle-schedule [vehicleId]="vid" [hasTracker]="editingHasTracker()" />

@@ -11,6 +11,7 @@ import {
   transformerAlerte,
   transformerAnalyse,
   transformerArretCarburant,
+  numeroSimDeDemo,
   transformerBoitier,
   transformerSim,
   transformerConducteur,
@@ -32,6 +33,7 @@ import {
   type Contexte,
   type TrameSemaine,
 } from './transformations';
+import { lireDepartsPourZones, regrouperDeparts, zonesDeDemo } from './zones-demo';
 
 export interface OptionsImport {
   /** La production, par un rôle SELECT SEULEMENT. */
@@ -220,6 +222,17 @@ export async function importerDemo(o: OptionsImport): Promise<BilanImport> {
     const affectations = await src.vehicleGroupAssignment.findMany({ where: { groupId: { in: groupes.map((g) => g.id) } } });
     const geofences = await src.geofence.findMany({ where: { fleetId: { in: flotteIds } }, orderBy: { createdAt: 'asc' } });
     const geofenceVehicules = await src.geofenceVehicle.findMany({ where: { geofenceId: { in: geofences.map((g) => g.id) } } });
+    // Source sans aucune zone : on en fabrique trois à partir des lieux de départ (cf. `zones-demo.ts`).
+    // Cette lecture est un filet de sécurité, pas une condition de l'import : si elle échoue, la démo
+    // reste sans zone — comme avant — au lieu de perdre tout le rafraîchissement hebdomadaire.
+    let departsPourZones: Awaited<ReturnType<typeof lireDepartsPourZones>> = [];
+    if (geofences.length === 0) {
+      try {
+        departsPourZones = await lireDepartsPourZones(src, vehiculeIds, depuisTrajets);
+      } catch (e) {
+        log(`Zones de démo ignorées (lecture des départs en échec) : ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     const lieux = await src.fleetPlace.findMany({ where: { fleetId: { in: flotteIds } }, orderBy: { createdAt: 'asc' } });
     const plannings = await src.vehicleSchedule.findMany({ where: { vehicleId: { in: vehiculeIds } } });
     const planningsTravail = await src.vehicleWorkSchedule.findMany({ where: { vehicleId: { in: vehiculeIds } } });
@@ -308,6 +321,7 @@ export async function importerDemo(o: OptionsImport): Promise<BilanImport> {
     for (const s of sims) ids.marquer('Sim', s.id);
     for (const g of groupes) ids.marquer('VehicleGroup', g.id);
     for (const g of geofences) ids.marquer('Geofence', g.id);
+    const zonesDeSynthese = geofences.length === 0 ? zonesDeDemo(regrouperDeparts(departsPourZones), ctx) : [];
     for (const s of stations) ids.marquer('FuelStation', s.id, s.id);
     for (const l of lieux) ids.marquer('FleetPlace', l.id);
     for (const t of trajetIds) ids.marquer('Trip', t);
@@ -356,7 +370,7 @@ export async function importerDemo(o: OptionsImport): Promise<BilanImport> {
           await tx.vehicle.upsert({ where: { id: ligne.id as string }, create: ligne, update: sansId(ligne) });
         }
         for (const b of boitiers) {
-          const ligne = transformerBoitier(b, ctx, imeis.get(b.id)!, msisdnParBoitier.get(b.id) ?? null);
+          const ligne = transformerBoitier(b, ctx, imeis.get(b.id)!, numeroSimDeDemo(o.sel, b.id, msisdnParBoitier.get(b.id) ?? null));
           await tx.tracker.upsert({ where: { id: ligne.id as string }, create: ligne, update: sansId(ligne) });
         }
         // Après les boîtiers : la SIM pointe vers l'un d'eux, et lui emprunte son IMEI de démo.
@@ -372,6 +386,9 @@ export async function importerDemo(o: OptionsImport): Promise<BilanImport> {
         for (const g of geofences) {
           const ligne = transformerGeofence(g, ctx, ++indexZone);
           await tx.geofence.upsert({ where: { id: ligne.id as string }, create: ligne, update: sansId(ligne) });
+        }
+        for (const z of zonesDeSynthese) {
+          await tx.geofence.upsert({ where: { id: z.ligne.id as string }, create: z.ligne, update: sansId(z.ligne) });
         }
         for (const lot of lots(stations)) await tx.fuelStation.createMany({ data: lot.map(transformerStation), skipDuplicates: true });
         for (const lot of lots(prix)) await tx.fuelStationPrice.createMany({ data: lot.map(transformerPrix), skipDuplicates: true });
@@ -426,6 +443,7 @@ export async function importerDemo(o: OptionsImport): Promise<BilanImport> {
         for (const lot of lots(affectations)) await tx.vehicleGroupAssignment.createMany({ data: lot.map((a) => transformerAffectation(a, ctx)), skipDuplicates: true });
         await tx.geofenceVehicle.deleteMany({ where: { vehicleId: { in: vehiculesDemo } } });
         for (const lot of lots(geofenceVehicules)) await tx.geofenceVehicle.createMany({ data: lot.map((g) => transformerGeofenceVehicule(g, ctx)), skipDuplicates: true });
+        for (const z of zonesDeSynthese) await tx.geofenceVehicle.createMany({ data: z.rattachements, skipDuplicates: true });
 
         // Les liens conducteur → compte, remis tels qu'ils étaient.
         for (const [driverId, userId] of liensComptes) {
@@ -536,7 +554,7 @@ export async function importerDemo(o: OptionsImport): Promise<BilanImport> {
           boitiers: boitiers.length,
           conducteurs: conducteurs.length,
           groupes: groupes.length,
-          geofences: geofences.length,
+          geofences: geofences.length + zonesDeSynthese.length,
           lieux: lieux.length,
           stations: stations.length,
           trajets: trajetIds.length,

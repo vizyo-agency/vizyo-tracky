@@ -325,6 +325,23 @@ export function transformerVehicule(src: Vehicle, ctx: Contexte, plaque: string)
 }
 
 /**
+ * Le numéro de SIM de démo d'un boîtier : celui de sa SIM importée, ou — quand la source n'en
+ * possède AUCUNE pour ce boîtier — un numéro dérivé de l'identifiant du boîtier.
+ *
+ * ⚠️ CORRECTIF DU 04/11/2026, relevé à la répétition de la démo du CH de Dieppe : neuf véhicules
+ * sur trente-neuf affichaient « SIM manquante ». Le défaut n'était pas dans l'importeur mais
+ * dans la source — la production ne rattache aucune ligne `sims` à ces neuf boîtiers — et
+ * l'importeur le recopiait fidèlement. Or ce badge se dérive de `simPhoneNumber` seul, et un
+ * prospect le lit comme une installation ratée. La démo n'a pas à reproduire un trou d'inventaire
+ * de la production : tous ses boîtiers ont une SIM, de la plage de fiction de l'ARCEP.
+ *
+ * Pur et déterministe (sel + identifiant source) : deux rafraîchissements donnent le même numéro.
+ */
+export function numeroSimDeDemo(sel: string, boitierIdSource: string, msisdnDeLaSim: string | null): string {
+  return msisdnDeLaSim ?? msisdnDemo(sel, `boitier-sans-sim:${boitierIdSource}`);
+}
+
+/**
  * `simPhoneNumber` reçoit le numéro DE DÉMO de la SIM posée dans ce boîtier, jamais celui de
  * la source. Il ne s'agit pas de décoration : l'écran véhicules en déduit le badge
  * d'installation — sans numéro, il affiche « SIM manquante » sur chaque véhicule, ce qu'un

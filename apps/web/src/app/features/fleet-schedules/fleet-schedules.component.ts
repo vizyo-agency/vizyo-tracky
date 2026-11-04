@@ -5,6 +5,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   computed,
+  HostListener,
   inject,
   type OnDestroy,
   type OnInit,
@@ -451,6 +452,18 @@ export class FleetSchedulesComponent implements OnInit, OnDestroy {
     this.editingVehicleId.set(r.vehicleId);
     this.editingHasTracker.set(r.hasTracker);
     this.editingPlate.set(r.plate);
+  }
+
+  /**
+   * Échap ferme le calque le plus récent : suivi d'application > aperçu du bulk > volet d'édition.
+   * Pendant une application en cours (`applying`) on ne ferme rien : la confirmation est en vol.
+   */
+  @HostListener('document:keydown.escape')
+  protected onEscape(): void {
+    if (this.applyResults()) this.closeApplyPanel();
+    else if (this.previewData()) {
+      if (!this.applying()) this.cancelPreview();
+    } else if (this.editingVehicleId()) this.closeEditor();
   }
 
   protected closeEditor(): void {

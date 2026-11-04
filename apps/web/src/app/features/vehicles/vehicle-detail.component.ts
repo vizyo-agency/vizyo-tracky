@@ -780,10 +780,12 @@ import { VehicleQrDialogComponent } from './vehicle-qr-dialog.component';
                   <div class="vd-history-row vd-history-row--meta">
                     <span class="vd-history-coords">{{ pos.lat | number:'1.4-4' }}, {{ pos.lng | number:'1.4-4' }}</span>
                     <span class="vd-history-flags">
-                      @if (pos.ignition === true) {
-                        <span class="vd-history-flag vd-history-flag--on">Contact ON</span>
-                      } @else if (pos.ignition === false) {
-                        <span class="vd-history-flag vd-history-flag--off">Contact OFF</span>
+                      @if (v.tracker?.accConnected !== false) {
+                        @if (pos.ignition === true) {
+                          <span class="vd-history-flag vd-history-flag--on">Contact ON</span>
+                        } @else if (pos.ignition === false) {
+                          <span class="vd-history-flag vd-history-flag--off">Contact OFF</span>
+                        }
                       }
                       @if (pos.valid) {
                         <span class="vd-history-flag vd-history-flag--ok">Fix<lucide-icon [img]="CheckIcon" [size]="10" aria-hidden="true"></lucide-icon><span class="sr-only">valide</span></span>
