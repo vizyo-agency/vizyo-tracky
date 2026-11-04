@@ -4,7 +4,7 @@ import { ROLES_KEY } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { OwnerVisibilityService } from '../common/owner-visibility.service';
 import { UserActivityController } from './user-activity.controller';
-import { UserActivityService } from './user-activity.service';
+import { UserActivityService, detailAgendaLisible } from './user-activity.service';
 
 function makePrisma() {
   const activitiesCreated: any[][] = [];
@@ -217,6 +217,117 @@ describe('UserActivityService', () => {
       // OWNER_VIS.isMasked = false en test → pas d'exclusion owner non plus.
       expect(where.requestedBy).toBeUndefined();
     });
+  });
+
+  // ── Démonstration (04/11/2026) : « Ibti Benzagouta · Admin flotte » dans « En ligne maintenant » ──
+  // La démo n'a qu'une flotte : un prospect FLEET_ADMIN y voyait un collègue réel, alors que la page
+  // Utilisateurs le cachait déjà. Même règle de lignée (`demo/demo-lignee.ts`) sur les écrans d'activité.
+  describe('démonstration : un prospect ne voit que sa lignée', () => {
+    const DEMO_ON = { enabled: true } as any;
+    const PROSPECT = { id: 'u1', role: 'FLEET_ADMIN' } as any;
+
+    function prismaDemo() {
+      const prisma = makePrisma() as any;
+      prisma.invitation = {
+        findMany: jest.fn().mockResolvedValue([
+          { email: 'invite@exemple.test', createdById: 'u1' }, // invité par le prospect → visible
+          { email: 'ibti@exemple.test', createdById: 'commercial' }, // lignée d'un autre → masqué
+        ]),
+      };
+      prisma.user.findMany = jest.fn(async (args: any) =>
+        args?.where?.OR
+          ? [{ id: 'super1' }, { id: 'owner1' }]
+          : [
+              { id: 'u1', email: 'prospect@exemple.test' },
+              { id: 'inv1', email: 'invite@exemple.test' },
+              { id: 'ibti', email: 'ibti@exemple.test' },
+              { id: 'seed1', email: 'demo-admin@demo.vizyoagency.com' },
+            ],
+      );
+      return prisma;
+    }
+    const nouveau = (prisma: any, demo?: any) =>
+      new UserActivityService(prisma, { record: jest.fn() } as any, OWNER_VIS, demo);
+
+    it('demoHiddenUserIds : masque le collègue réel, garde le prospect, ses invités et les comptes @demo', async () => {
+      const svc = nouveau(prismaDemo(), DEMO_ON);
+      expect(await svc.demoHiddenUserIds(PROSPECT)).toEqual(['ibti']);
+    });
+
+    it('hors démonstration : [] et AUCUNE lecture en base (la production n’y passe jamais)', async () => {
+      const prisma = prismaDemo();
+      const svc = nouveau(prisma, undefined);
+      expect(await svc.demoHiddenUserIds(PROSPECT)).toEqual([]);
+      expect(await nouveau(prisma, { enabled: false }).demoHiddenUserIds(PROSPECT)).toEqual([]);
+      expect(prisma.invitation.findMany).not.toHaveBeenCalled();
+      expect(prisma.user.findMany).not.toHaveBeenCalled();
+    });
+
+    it('un super-administrateur (l’exploitant) voit tout, même en démonstration', async () => {
+      const prisma = prismaDemo();
+      const svc = nouveau(prisma, DEMO_ON);
+      expect(await svc.demoHiddenUserIds({ id: 'sa', role: UserRole.SUPER_ADMIN })).toEqual([]);
+      expect(prisma.invitation.findMany).not.toHaveBeenCalled();
+    });
+
+    it('getOnline(scope) écarte AUSSI les comptes masqués — « En ligne maintenant »', async () => {
+      const prisma = prismaDemo();
+      await nouveau(prisma, DEMO_ON).getOnline(USER, { fleetId: 'f1', hiddenUserIds: ['ibti'] });
+      const where = prisma.userSession.findMany.mock.calls[0][0].where;
+      expect(where.userId).toEqual({ notIn: ['super1', 'owner1', 'ibti'] });
+    });
+
+    it('getFeed(scope) écarte AUSSI les comptes masqués — fil d’activité', async () => {
+      const prisma = prismaDemo();
+      await nouveau(prisma, DEMO_ON).getFeed({}, USER, { fleetId: 'f1', hiddenUserIds: ['ibti'] });
+      const and = prisma.userActivity.findMany.mock.calls[0][0].where.AND;
+      expect(and).toEqual(expect.arrayContaining([{ userId: { notIn: ['super1', 'owner1', 'ibti'] } }]));
+    });
+
+    it('getEngineCommands(scope) écarte AUSSI les comptes masqués — commandes moteur', async () => {
+      const prisma = prismaDemo();
+      await nouveau(prisma, DEMO_ON).getEngineCommands({}, USER, { fleetId: 'f1', hiddenUserIds: ['ibti'] });
+      const where = prisma.engineControlCommand.findMany.mock.calls[0][0].where;
+      expect(where.requestedBy).toEqual({ notIn: ['super1', 'owner1', 'ibti'] });
+    });
+
+    it('sans comptes masqués (production) : le filtre reste EXACTEMENT celui des rôles élevés', async () => {
+      const prisma = prismaDemo();
+      await nouveau(prisma, DEMO_ON).getOnline(USER, { fleetId: 'f1' });
+      expect(prisma.userSession.findMany.mock.calls[0][0].where.userId).toEqual({ notIn: ['super1', 'owner1'] });
+    });
+  });
+});
+
+describe('detailAgendaLisible — libellé client du passage de l’agent de l’agenda (04/11/2026)', () => {
+  const brut =
+    "Agent agenda (scheduled) : 0 réservé(s), 107 proposé(s), 2319 ignoré(s) (dont 12 véhicule(s) hors service) · avis de l'IA confié au poste";
+
+  it("« scheduled » et « confié au poste » ne parlent pas à un client", () => {
+    const lisible = detailAgendaLisible('agenda_agent_run', brut)!;
+    expect(lisible).toBe(
+      "Passage automatique de l'agent de l'agenda : 0 réservé(s), 107 proposé(s), 2319 ignoré(s) (dont 12 véhicule(s) hors service) · avis de l'IA en préparation",
+    );
+    expect(lisible).not.toMatch(/scheduled|confié au poste/);
+  });
+
+  it('un lancement manuel et une origine inconnue sont aussi reformulés', () => {
+    expect(detailAgendaLisible('agenda_agent_run', 'Agent agenda (manual) : 1 réservé(s), 0 proposé(s), 0 ignoré(s)')).toBe(
+      "Passage de l'agent de l'agenda lancé à la main : 1 réservé(s), 0 proposé(s), 0 ignoré(s)",
+    );
+    expect(detailAgendaLisible('agenda_agent_run', 'Agent agenda (autre) : 0 réservé(s), 0 proposé(s), 0 ignoré(s)')).toBe(
+      "Passage de l'agent de l'agenda : 0 réservé(s), 0 proposé(s), 0 ignoré(s)",
+    );
+  });
+
+  it('sans « avis de l’IA », le détail est conservé tel quel ; les autres lignes ne sont jamais touchées', () => {
+    expect(detailAgendaLisible('agenda_agent_run', 'Agent agenda (cron) : 1 réservé(s), 0 proposé(s), 0 ignoré(s)')).toBe(
+      "Passage automatique de l'agent de l'agenda : 1 réservé(s), 0 proposé(s), 0 ignoré(s)",
+    );
+    expect(detailAgendaLisible('reservation_creee', 'Agent agenda (scheduled) : ceci n’est pas une ligne de l’agent')).toBe(
+      'Agent agenda (scheduled) : ceci n’est pas une ligne de l’agent',
+    );
+    expect(detailAgendaLisible('agenda_agent_run', null)).toBeNull();
   });
 });
 
@@ -559,7 +670,8 @@ describe('UserActivityService.getAgendaFeed — owner caché selon le LECTEUR', 
 
 describe('Route GET fleet-admin/activity/agenda — périmètre', () => {
   function controller() {
-    const svc = { getAgendaFeed: jest.fn().mockResolvedValue([]) };
+    // `demoHiddenUserIds` : hors démonstration, aucun compte masqué (le service réel rend `[]`).
+    const svc = { getAgendaFeed: jest.fn().mockResolvedValue([]), demoHiddenUserIds: jest.fn().mockResolvedValue([]) };
     const ctrl = new UserActivityController(svc as any, {} as any, { getFeed: jest.fn() } as any);
     return { ctrl, svc };
   }

@@ -18,6 +18,7 @@ import { EmailService } from '../email/email.service';
 import { InvitationsService } from '../invitations/invitations.service';
 import { OwnerVisibilityService } from '../common/owner-visibility.service';
 import { DemoModeService } from '../demo/demo-mode.service';
+import { DOMAINE_DEMO, idsDeLignee } from '../demo/demo-lignee';
 import { MissionShareService } from '../depot/mission-share.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { clampPartialPermissions, clampPermissions, getDefaultPermissions } from './default-permissions';
@@ -57,9 +58,6 @@ export class UsersController {
     // Démonstration : optionnel, car les specs instancient ce contrôleur à la main.
     @Optional() private readonly demoMode?: DemoModeService,
   ) {}
-
-  /** Domaine des comptes de rôle posés par le seed de la démonstration. */
-  private static readonly DOMAINE_DEMO = '@demo.vizyoagency.com';
 
   /**
    * ── EN DÉMONSTRATION, UN PROSPECT NE VOIT QUE SA LIGNÉE ──────────────────────────────
@@ -107,33 +105,15 @@ export class UsersController {
       this.prisma.invitation.findMany({ select: { email: true, createdById: true } }),
       this.prisma.user.findMany({ select: { id: true, email: true } }),
     ]);
-    const idParEmail = new Map(comptes.map((c) => [c.email.toLowerCase(), c.id]));
-
-    // Parcours en largeur de la descendance. Un e-mail déjà vu ne se rouvre pas : c'est ce
-    // qui borne le parcours si deux invitations se croisaient.
-    const idsAutorises = new Set<string>([viewer.id]);
-    const emailsVus = new Set<string>();
-    const file: string[] = [viewer.id];
-    while (file.length > 0) {
-      const auteur = file.shift()!;
-      for (const inv of invitations) {
-        if (inv.createdById !== auteur) continue;
-        const email = inv.email.toLowerCase();
-        if (emailsVus.has(email)) continue;
-        emailsVus.add(email);
-        const id = idParEmail.get(email);
-        if (id && !idsAutorises.has(id)) {
-          idsAutorises.add(id);
-          file.push(id);
-        }
-      }
-    }
+    // Parcours en largeur de la descendance : `demo/demo-lignee.ts` (aussi lu par les écrans
+    // d'activité de la flotte — la règle ne doit exister qu'une fois).
+    const idsAutorises = idsDeLignee(viewer.id, invitations, comptes);
 
     return {
       utilisateurs: {
         OR: [
           { id: { in: [...idsAutorises] } },
-          { email: { endsWith: UsersController.DOMAINE_DEMO } },
+          { email: { endsWith: DOMAINE_DEMO } },
         ],
       },
       // Une invitation en attente EST une adresse en clair : même lignée, même règle.

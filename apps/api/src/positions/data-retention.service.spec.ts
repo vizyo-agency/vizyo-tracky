@@ -26,7 +26,9 @@ function makePrisma() {
       // 2) per-fleet counts
       .mockResolvedValueOnce([
         { fleetid: 'f1', active: 100, archive: 5, todelete: 3, oldest: new Date('2024-01-01') },
-      ]),
+      ])
+      // 3) toute lecture suivante (snapshot recalcule apres une purge reelle) : base « propre »
+      .mockResolvedValue([]),
     fleet: { findMany: jest.fn().mockResolvedValue([{ id: 'f1', name: 'Flotte 1' }]) },
     retentionSnapshot: { deleteMany: jest.fn(), createMany: jest.fn() },
     $transaction: jest.fn().mockResolvedValue([]),
@@ -90,6 +92,48 @@ describe('DataRetentionService — retention positions (Sprint 6)', () => {
     expect(res.disabled).toBe(true);
     expect((prisma as unknown as { $transaction: jest.Mock }).$transaction).not.toHaveBeenCalled();
     expect((prisma as unknown as { $executeRawUnsafe: jest.Mock }).$executeRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it("purge reelle : le snapshot est RECALCULE apres la suppression (04/11/2026 — « 17 141 a supprimer » deja supprimees)", async () => {
+    const prisma = makePrisma();
+    const p = prisma as unknown as { $transaction: jest.Mock; $executeRawUnsafe: jest.Mock; $queryRawUnsafe: jest.Mock };
+    const ordre: string[] = [];
+    p.$executeRawUnsafe.mockImplementation(async () => { ordre.push('suppression'); return 3; });
+    p.$transaction.mockImplementation(async () => { ordre.push('snapshot'); return []; });
+    const svc = new DataRetentionService(prisma, makeConfig({ POSITIONS_PURGE_ENABLED: 'true' }), sysAct);
+
+    const res = await svc.runPositionsRetention();
+
+    expect(res.mode).toBe('REAL');
+    expect(res.deletedCount).toBe(3);
+    expect(res.toDeleteCount).toBe(3); // la CIBLE de la nuit, pour le journal — pas ce qui reste
+    // snapshot (avant) → suppression → snapshot (apres) : l'ecran ne montre plus l'ancien compteur
+    expect(ordre).toEqual(['snapshot', 'suppression', 'snapshot']);
+    expect(p.$queryRawUnsafe).toHaveBeenCalledTimes(4); // 2 lectures par snapshot
+  });
+
+  it('purge reelle qui ne supprime rien : un seul snapshot (rien a rafraichir)', async () => {
+    const prisma = makePrisma();
+    const p = prisma as unknown as { $transaction: jest.Mock; $executeRawUnsafe: jest.Mock };
+    p.$executeRawUnsafe.mockResolvedValue(0);
+    const svc = new DataRetentionService(prisma, makeConfig({ POSITIONS_PURGE_ENABLED: 'true' }), sysAct);
+
+    await svc.runPositionsRetention();
+
+    expect(p.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("l'echec du snapshot post-purge n'est PAS rapporte comme un echec de la purge", async () => {
+    const prisma = makePrisma();
+    const p = prisma as unknown as { $transaction: jest.Mock };
+    p.$transaction.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error('base occupee'));
+    const svc = new DataRetentionService(prisma, makeConfig({ POSITIONS_PURGE_ENABLED: 'true' }), sysAct);
+
+    const res = await svc.runPositionsRetention();
+
+    expect(res.disabled).toBe(false);
+    expect(res.mode).toBe('REAL');
+    expect(res.deletedCount).toBe(3);
   });
 
   it('recomputeSnapshot : calcule le snapshot sans rien supprimer (refresh lecture seule)', async () => {

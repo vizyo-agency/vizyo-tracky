@@ -7,7 +7,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { ErrorLogger } from '../observability/error-logger.service';
 import { SystemActivityService } from '../system-activity/system-activity.service';
 import { ActivityBatchDto, ClientErrorDto } from './dto/track-event.dto';
-import { UserActivityService } from './user-activity.service';
+import { UserActivityService, type FleetActivityScope } from './user-activity.service';
 
 /**
  * User activity tracking.
@@ -162,23 +162,27 @@ export class UserActivityController {
   // ─────────────────────────────────────────────────────────────────────────
 
   /** Flotte cible : celle du fleet-admin ; un super-admin (support) peut passer `?fleetId=`. */
-  private fleetScope(user: AuthenticatedRequest['user'], fleetIdQuery?: string): { fleetId: string } | null {
+  private async fleetScope(user: AuthenticatedRequest['user'], fleetIdQuery?: string): Promise<FleetActivityScope | null> {
     const fleetId = user.role === UserRole.SUPER_ADMIN ? (fleetIdQuery ?? null) : (user.fleetId ?? null);
-    return fleetId ? { fleetId } : null;
+    if (!fleetId) return null;
+    // Démonstration : un prospect ne voit que sa lignée (et les comptes de rôle du seed), comme sur
+    // la page Utilisateurs. `[]` — et aucune lecture — hors démo et pour un super-administrateur.
+    const hiddenUserIds = await this.svc.demoHiddenUserIds(user);
+    return hiddenUserIds.length ? { fleetId, hiddenUserIds } : { fleetId };
   }
 
   @Get('fleet-admin/activity/online')
   @UseGuards(RolesGuard)
   @Roles(UserRole.FLEET_ADMIN, UserRole.SUPER_ADMIN)
-  fleetOnline(@Req() req: AuthenticatedRequest, @Query('fleetId') fleetId?: string) {
-    const scope = this.fleetScope(req.user, fleetId);
+  async fleetOnline(@Req() req: AuthenticatedRequest, @Query('fleetId') fleetId?: string) {
+    const scope = await this.fleetScope(req.user, fleetId);
     return scope ? this.svc.getOnline(req.user, scope) : [];
   }
 
   @Get('fleet-admin/activity/feed')
   @UseGuards(RolesGuard)
   @Roles(UserRole.FLEET_ADMIN, UserRole.SUPER_ADMIN)
-  fleetFeed(
+  async fleetFeed(
     @Req() req: AuthenticatedRequest,
     @Query('limit') limit?: string,
     @Query('before') before?: string,
@@ -189,7 +193,7 @@ export class UserActivityController {
     @Query('to') to?: string,
     @Query('fleetId') fleetId?: string,
   ) {
-    const scope = this.fleetScope(req.user, fleetId);
+    const scope = await this.fleetScope(req.user, fleetId);
     if (!scope) return [];
     return this.svc.getFeed(
       { limit: limit ? parseInt(limit, 10) || 50 : 50, before, beforeId, userId, type, from, to },
@@ -201,7 +205,7 @@ export class UserActivityController {
   @Get('fleet-admin/activity/engine-commands')
   @UseGuards(RolesGuard)
   @Roles(UserRole.FLEET_ADMIN, UserRole.SUPER_ADMIN)
-  fleetEngineCommands(
+  async fleetEngineCommands(
     @Req() req: AuthenticatedRequest,
     @Query('limit') limit?: string,
     @Query('before') before?: string,
@@ -209,7 +213,7 @@ export class UserActivityController {
     @Query('status') status?: string,
     @Query('fleetId') fleetId?: string,
   ) {
-    const scope = this.fleetScope(req.user, fleetId);
+    const scope = await this.fleetScope(req.user, fleetId);
     if (!scope) return [];
     return this.svc.getEngineCommands(
       { limit: limit ? parseInt(limit, 10) || 50 : 50, before, action, status },
@@ -229,7 +233,7 @@ export class UserActivityController {
   @Get('fleet-admin/activity/agenda')
   @UseGuards(RolesGuard)
   @Roles(UserRole.FLEET_ADMIN, UserRole.SUPER_ADMIN)
-  fleetAgenda(
+  async fleetAgenda(
     @Req() req: AuthenticatedRequest,
     @Query('limit') limit?: string,
     @Query('before') before?: string,
@@ -237,7 +241,7 @@ export class UserActivityController {
     @Query('category') category?: string,
     @Query('fleetId') fleetId?: string,
   ) {
-    const scope = this.fleetScope(req.user, fleetId);
+    const scope = await this.fleetScope(req.user, fleetId);
     if (!scope) return [];
     return this.svc.getAgendaFeed(
       { limit: limit ? parseInt(limit, 10) || 50 : 50, before, beforeId, category },

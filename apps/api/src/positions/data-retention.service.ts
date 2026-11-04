@@ -164,6 +164,25 @@ export class DataRetentionService {
     this.logger.log(
       `[retention] SUPPRESSION REELLE : ${deletedCount} position(s) > ${horizon}j supprimee(s) par lots (cible ${toDeleteCount}).`,
     );
+
+    // 2 bis) Le snapshot du 1) a ete pris AVANT la suppression : tel quel, les ecrans de suivi
+    // (« Donnees & retention », vue admin) afficheraient en rouge « N a supprimer » — le nombre
+    // qu'on VIENT de supprimer — et une « prochaine suppression » deja passee, jusqu'au passage
+    // de la nuit suivante. Constate le 04/11/2026 sur la demo : « 17 141 a supprimer · prochaine
+    // suppression 03/11 » alors que la purge de 03:30 avait fait son travail (journal
+    // `positions_purged`). On le recalcule donc apres une purge reelle. Echec = avertissement
+    // seulement : la suppression a eu lieu, elle ne doit pas etre rapportee comme un echec.
+    let snapshotAt = computedAt;
+    if (deletedCount > 0) {
+      try {
+        const apres = this.windows(cfg);
+        snapshotAt = (await this.computeAndStoreSnapshot(apres.archiveFrom, apres.deleteFrom, cfg)).computedAt;
+      } catch (err) {
+        this.logger.warn(
+          `[retention] snapshot post-purge non recalcule (le precedent reste affiche) : ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
     // Palier B — trace la purge RÉELLE (action système destructive) quand elle efface vraiment
     // quelque chose. Le dry-run (POSITIONS_PURGE_ENABLED=false) n'atteint jamais cette branche.
     if (deletedCount > 0) {
@@ -184,7 +203,7 @@ export class DataRetentionService {
       archiveDays: cfg.archiveDays,
       toDeleteCount,
       deletedCount,
-      computedAt,
+      computedAt: snapshotAt,
     };
   }
 

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import type {
   ActivityFeedItemDto,
@@ -13,6 +13,8 @@ import { ACTIVITY_TYPES_SERVEUR, AGENDA_ACTIVITY_ACTION_LABELS, labelForRoute } 
 import { Prisma, UserRole } from '@prisma/client';
 import type { AuthUser } from '../auth/types/auth-user';
 import { OwnerVisibilityService } from '../common/owner-visibility.service';
+import { idsMasques } from '../demo/demo-lignee';
+import { DemoModeService } from '../demo/demo-mode.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemActivityService } from '../system-activity/system-activity.service';
 
@@ -33,6 +35,28 @@ interface ActivityEventLike {
  */
 export interface FleetActivityScope {
   fleetId: string;
+  /**
+   * Démonstration uniquement : comptes que le lecteur ne doit pas voir (hors de sa lignée
+   * d'invitation, hors comptes de rôle du seed). Absent ou vide partout ailleurs — la production
+   * ne passe jamais par là. Voir `demo/demo-lignee.ts`.
+   */
+  hiddenUserIds?: string[];
+}
+
+/**
+ * Le journal technique écrit « Agent agenda (scheduled) : 0 réservé(s), 107 proposé(s), 2319 ignoré(s)
+ * · avis de l'IA confié au poste » — lisible pour l'exploitant, pas pour un client : « scheduled » est
+ * le nom d'une variable, et « confié au poste » décrit un mécanisme interne. L'écran Activité de la
+ * flotte (côté client) reformule À LA LECTURE, donc aussi pour les lignes déjà écrites ; le journal
+ * technique des super-administrateurs garde son texte exact.
+ */
+export function detailAgendaLisible(action: string, detail: string | null): string | null {
+  if (!detail || action !== 'agenda_agent_run') return detail;
+  return detail
+    .replace(/^Agent agenda \((?:scheduled|cron)\)/, "Passage automatique de l'agent de l'agenda")
+    .replace(/^Agent agenda \(manual\)/, "Passage de l'agent de l'agenda lancé à la main")
+    .replace(/^Agent agenda \([^)]*\)/, "Passage de l'agent de l'agenda")
+    .replace(/ · avis de l'IA confié au poste$/, " · avis de l'IA en préparation");
 }
 
 /** Au-delà de ce silence on rattache à une nouvelle session, pas à l'ancienne. */
@@ -97,7 +121,37 @@ export class UserActivityService {
     private readonly prisma: PrismaService,
     private readonly systemActivity: SystemActivityService,
     private readonly ownerVis: OwnerVisibilityService,
+    // Démonstration : optionnel, car les specs instancient ce service à la main.
+    @Optional() private readonly demoMode?: DemoModeService,
   ) {}
+
+  /**
+   * Démonstration — comptes que ce lecteur ne doit pas voir dans les écrans d'activité de la flotte.
+   *
+   * La démo n'a qu'une flotte : sans cette borne, « En ligne maintenant » nommait un collègue réel
+   * qui consultait la démo (« Ibti Benzagouta · Admin flotte · Tableau de bord ») alors que la page
+   * Utilisateurs, elle, le cachait déjà. Même règle que `UsersController.cloisonDemo`
+   * (`demo/demo-lignee.ts`) : la lignée d'invitation du lecteur et les comptes de rôle du seed
+   * restent ; tout le reste est écarté, présence comme historique.
+   *
+   * `[]` hors démonstration et pour un super-administrateur (l'exploitant voit tout) : AUCUNE
+   * lecture en base dans ces deux cas — la production n'est jamais ralentie par ce chemin.
+   */
+  async demoHiddenUserIds(viewer: { id: string; role?: UserRole | null }): Promise<string[]> {
+    if (!this.demoMode?.enabled) return [];
+    if (viewer.role === UserRole.SUPER_ADMIN) return [];
+    const [invitations, comptes] = await Promise.all([
+      this.prisma.invitation.findMany({ select: { email: true, createdById: true } }),
+      this.prisma.user.findMany({ select: { id: true, email: true } }),
+    ]);
+    return idsMasques(viewer.id, invitations, comptes);
+  }
+
+  /** Comptes à écarter d'une vue de flotte : rôles élevés + (en démo) hors lignée du lecteur. */
+  private async excludedFromFleetView(scope: FleetActivityScope): Promise<string[]> {
+    const elevated = await this.getElevatedUserIds();
+    return scope.hiddenUserIds?.length ? [...new Set([...elevated, ...scope.hiddenUserIds])] : elevated;
+  }
 
   /** Ingestion d'un batch d'events : résout/crée la session, persiste, met à jour la présence. */
   async ingestBatch(
@@ -246,7 +300,7 @@ export class UserActivityService {
     if (scope) {
       // Vue fleet-admin : bornée à la flotte + EXCLUT les rôles élevés (super-admin/owner).
       where.fleetId = scope.fleetId;
-      where.userId = { notIn: await this.getElevatedUserIds() };
+      where.userId = { notIn: await this.excludedFromFleetView(scope) };
     }
     const sessions = await this.prisma.userSession.findMany({
       where,
@@ -301,7 +355,7 @@ export class UserActivityService {
     if (scope) {
       // Vue fleet-admin : bornée à la flotte + EXCLUT les rôles élevés (super-admin/owner).
       and.push({ fleetId: scope.fleetId });
-      and.push({ userId: { notIn: await this.getElevatedUserIds() } });
+      and.push({ userId: { notIn: await this.excludedFromFleetView(scope) } });
     }
     if (filters.type && FEED_TYPES.has(filters.type)) and.push({ type: filters.type });
     if (filters.from) {
@@ -420,7 +474,10 @@ export class UserActivityService {
     // moins d'une minute (cache de getElevatedUserIds) : il resterait « Équipe Tracky ».
     const auteurs = [...new Set(rows.map((r) => r.triggeredByUserId).filter((x): x is string => !!x))];
     const eleves = new Set(auteurs.length ? await this.getElevatedUserIds() : []);
-    const aCharger = auteurs.filter((id) => !eleves.has(id));
+    // Démonstration : un compte hors de la lignée du lecteur n'est pas nommé (« Utilisateur »),
+    // et son nom n'est pas chargé non plus.
+    const masques = new Set(scope.hiddenUserIds ?? []);
+    const aCharger = auteurs.filter((id) => !eleves.has(id) && !masques.has(id));
     const users = aCharger.length
       ? await this.prisma.user.findMany({
           where: { id: { in: aCharger } },
@@ -457,7 +514,7 @@ export class UserActivityService {
       status: r.status,
       ...auteur(r),
       vehiclePlate: r.target,
-      detail: r.detail,
+      detail: detailAgendaLisible(r.action, r.detail),
     }));
   }
 
@@ -567,7 +624,7 @@ export class UserActivityService {
       // tracker → vehicle → fleetId, la commande ne porte pas de fleetId), et JAMAIS celles
       // demandées par un rôle ÉLEVÉ (super-admin/owner) — un fleet-admin ne voit pas au-dessus.
       where.tracker = { vehicle: { fleetId: scope.fleetId } };
-      const elevated = await this.getElevatedUserIds();
+      const elevated = await this.excludedFromFleetView(scope);
       if (elevated.length) where.requestedBy = { notIn: elevated };
     } else if (this.ownerVis.isMasked(viewer)) {
       // Vue super-admin — commandes moteur demandées par l'owner exclues pour un viewer
